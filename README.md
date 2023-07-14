@@ -1,5 +1,5 @@
 # es1190_3dxrd
-This repository contains several python functions used to process 3D X-Ray diffraction (3DXRD) data for the ERC BREAK project (https://www.mn.uio.no/njord/english/research/projects/break/). 3DXRD data analysis is built upon the python package ImageD11 (https://github.com/FABLE-3DXRD/ImageD11).
+This repository contains several python functions used to process 3D X-Ray diffraction (3DXRD) data for the ERC BREAK project (https://www.mn.uio.no/njord/english/research/projects/break/ - proposal es1190 at ESRF). 3DXRD data analysis is built upon the python package ImageD11 (https://github.com/FABLE-3DXRD/ImageD11).
 
 Functions are split into diferent modules:
 - rawimage.py: Functions to be used on raw hdf5 output from the detector. It includes functions to read data from different scans, plot sinogram and do filtered back projection +
