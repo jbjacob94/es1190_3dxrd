@@ -12,7 +12,7 @@ from ImageD11.grain import grain, write_grain_file, read_grain_file
 from id11_utils import peakfiles
 
 
-# functions to identify Fridel pairs in a dataset and perform operations using these pairs (tth correction, findinx xy, ys, reflection coordinates in the sample)
+# functions to identify Fridel pairs in a dataset and perform operations using these pairs (tth correction, find xy, ys, reflection coordinates in the sample)
 
 
 def fix_ybins(ds):
@@ -134,7 +134,7 @@ def compute_csr_dist_mat(c1, c2, dist_cutoff, mult_fact_tth, mult_fact_I, verbos
     return dij
                       
 def find_best_matches(dij_csr, verbose=True):
-    """ clean the csr distance matrix to avoid pairing peaks from c1 with multiple peaks from c2 and conversely.
+    """ clean the csr distance matrix to avoid pairing a peak from c1 with multiple peaks from c2 and conversely.
     dij_csr: input sparse matrix of shape M*N, where M = c1.nrows ad M = c2.nrows
     doplot : if True, does some plotting to see how good the match is between pairs. 
              computes distribution of euclidian distance between pairs +  distance along each coordinate (tth_, sI, eta, omega) 
@@ -145,7 +145,7 @@ def find_best_matches(dij_csr, verbose=True):
     n_pairs_all = dij_csr.nnz                  
     
     # Work on inverse of distance and find max values. Have to do this because dij.argmin() returns position of zeros of the
-    #matrix, which is quite useless, and there is no method implemented in csr to return minimum non-zero values
+    # matrix, which is quite useless, and there is no method implemented in csr to return minimum non-zero values
     dij_best = dij_csr.copy()
     dij_best.data = np.divide(np.ones_like(dij_csr.data), dij_csr.data, out=np.zeros_like(dij_csr.data), where=dij_csr.data!=0)
     
@@ -413,7 +413,7 @@ def recast(ary):
         
 def update_fpairs_geometry(cf, detector = 'eiger', update_gvecs=True):
     """ update geometry of columnfile using friedel pair information. Finds corrected tth, d-spacing (d) and xs,ys coordinate of peak origin in the sample
-    input: columnfile cf. Must contain columns with freidel pair labels 'fp_id' and friedel pair distance (fp_dist)
+    input: columnfile cf. Must contain columns with Friedel pair labels 'fp_id' and friedel pair distance (fp_dist)
     detector : eiger / frelon. The two different stations on ID11, use different distance units (µm/mm)
     update_gvecs : Bool flag. If True, recompute g-vectors according to corrected tth"""
     
@@ -433,8 +433,8 @@ def update_fpairs_geometry(cf, detector = 'eiger', update_gvecs=True):
     
     # check that splitting is ok
     assert len(m1) == len(m2)
-    assert sum(cf.fp_id[m1] - cf.fp_id[m2]) == 0
-    assert sum(cf.fp_dist[m1] - cf.fp_dist[m2]) == 0
+    assert np.all(np.equal(cf.fp_id[m1],cf.fp_id[m2]))
+    assert np.all(np.equal(cf.fp_dist[m1], cf.fp_dist[m2]))
     
     # compute new parameters: tth_cor, d_cor, etc.
     #################################################################################
@@ -448,25 +448,35 @@ def update_fpairs_geometry(cf, detector = 'eiger', update_gvecs=True):
     tth_cor = np.degrees(np.arctan( (tan1 + tan2)/2 ) )  # tan_cor = (tan1 + tan2)/2
     d_cor = 2 * np.sin(np.radians(tth_cor)/2) / wl
     
-    # get xs, ys, coords in sample
+    # get dx, dy: distance of peak from rot center along x and y axis
     dy = (cf.dty[m1] - cf.dty[m2]) / 2  # scan distance from rotation center (y-direction)
     if detector == 'eiger':
         dx = L * (tan1-tan2)/(tan1+tan2)    # distance from rot center along the beam (x direction) in µm (eiger detector , ns station)
     else:
         dx = L/1000 * (tan1-tan2) / (tan1+tan2)    # distance from rot center along the beam (x direction) in mm (Frelon detector, 3DXRD station)
-    o = np.radians(cf.omega)            
-    co,so = np.cos(o), np.sin(o)      
+    
+    # cos(omega) + sin(omega), needed to rotate back peak coordinates to sample reference frame
+    o = np.radians(cf.omega)
+    o[m2] = (o[m2]-np.pi)%(2*np.pi)  # rotate peaks from c2 by 180°
+    co,so = np.cos(o), np.sin(o)
+
+    # little subtility: omega can be slightly different between two members of a friedel pair -> would lead to different xs,ys, which causes issues
+    #later in the processing -> for each pair, take average value of omega and assign it to both peaks 
+    co = recast((co[m1]+co[m2])/2)
+    so = recast((so[m1]+so[m2])/2)
     
     # rearrange dx, dy arrays + invert sign for data from negative dty scans (needed to make xs, ys match for fp twins)
     dx = recast(dx)
-    dx[m2] = -dx[m2]
+    #dx[m2] = -dx[m2]
     dy = recast(dy)
-    dy[m2] = -dy[m2]
+    #dy[m2] = -dy[m2]
     
     r_dist = np.sqrt(dx**2 + dy**2)
 
+    # calculate x,y coordinates in sample reference frame (xs ,ys)
     xs = co*dx + so*dy
     ys = -so*dx + co*dy
+    
     
     # recast arrays and add them as new columns in cf
     cf.addcolumn(recast(tth_cor), 'tthc')
@@ -505,3 +515,30 @@ def split_fpairs(cf):
     
     return c, c_
 
+
+
+def find_missing_twins(cf, selection, restrict_search=False, restrict_subset=[]):
+    """ starting from a peakfile cf and a subset of it (selected with peak index), this code:
+    1) find friedel pair ids (fpids) of peaks in the subset
+    2) Identify "singles", ie peaks missing their friedel twin with same fpid
+    3) Find the missing twins in the full columnfile or in a second subset (if restrict_search is true) and add them to the selection
+    Search can be restricted to a second subset of cf '"""
+    
+    fpids = cf.fp_id[selection]  # fpids in selection
+    
+    # use np.unique to find "single" peaks: peaks missign their friedel twin
+    _, ind, cnt = np.unique(fpids, return_counts=True, return_index=True)
+    fp_single = fpids[ind[cnt!=2]]
+    
+    if len(fp_single)==0:
+        return selection
+    
+    # list of peaks ids to select in columnfile
+    if restrict_search is True:
+        pks_to_add = np.concatenate([np.argwhere(cf.fp_id[restrict_subset] == i) for i in fp_single])[:,0]   # pks indices to select in subset
+        newpks = restrict_subset[pks_to_add]  # pks indices to select in full subset
+    else:
+         newpks = np.concatenate([np.argwhere(cf.fp_id == i) for i in fp_single])[:,0]
+    
+    new_selection = np.unique( np.concatenate((selection, newpks)) )  # concatenate with former selection
+    return new_selection
