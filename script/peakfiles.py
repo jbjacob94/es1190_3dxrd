@@ -17,6 +17,7 @@ from orix.crystal_map import Phase
 
 # General functions to do some operations on imageD11 columnfiles
 
+# colf conv
 def colf_to_dict(cf):
     "converts ImageD11 columnfile to python dictionnary"""
     keys = cf.titles
@@ -24,6 +25,7 @@ def colf_to_dict(cf):
     cf_dict = dict(zip(keys, cols))
     return cf_dict
 
+#divers
 def rnd( a, p, t):
     if p == 0:
         return a.astype(t)
@@ -32,7 +34,7 @@ def rnd( a, p, t):
     return a
 
 
-
+# colf conv
 def colf_to_hdf( colfile, hdffile, save_mode='minimal', name=None, compression='lzf', compression_opts=None):
     
         """
@@ -83,8 +85,8 @@ def colf_to_hdf( colfile, hdffile, save_mode='minimal', name=None, compression='
             g = h.create_group( name )
         g.attrs['ImageD11_type'] = 'peaks'
         
-        exclude = ['xl', 'yl', 'zl', 'tth', 'tthc', 'eta', 'gx', 'gy', 'gz', 'ds', 'dsc', 'xs', 'ys', 'r_dist']
-        
+        # col to exclude in "minimal" saving mode (can be recomputed with info from other columns, but takes a bit longer) 
+        exclude = ['xl', 'yl', 'zl', 'tth', 'tthc', 'eta', 'gx', 'gy', 'gz', 'ds', 'dsc', 'xs', 'ys', 'r_dist', 'xi', 'yi']
         if save_mode == 'minimal':
             cols = [col for col in c.titles if col not in exclude]
         else:
@@ -109,7 +111,7 @@ def colf_to_hdf( colfile, hdffile, save_mode='minimal', name=None, compression='
             h.close()
             
             
-                
+# colf conv                 
 def pkstocolf( pkd , parfile, 
             dxfile="/data/id11/nanoscope/Eiger/spatial_20210415_JW/e2dx.edf",
             dyfile="/data/id11/nanoscope/Eiger/spatial_20210415_JW/e2dy.edf",
@@ -122,7 +124,7 @@ def pkstocolf( pkd , parfile,
     cf.updateGeometry()
     return cf
             
-
+# colf conv
 def colfile_from_dict( pks ):
     """Convert a dictionary of numpy arrays to columnfile """
     titles = list(pks.keys())
@@ -134,7 +136,7 @@ def colfile_from_dict( pks ):
     colf.set_bigarray( [ pks[t] for t in titles ] )
     return colf
 
-
+# colf update
 def fix_flt( c, cor, parfile ):
     """ 
     spline correction for ImageD11 columnfile
@@ -152,7 +154,7 @@ def fix_flt( c, cor, parfile ):
     c.updateGeometry()
     return c
 
-
+# uc params
 def get_uc(c, parfile):
     """ computes unitcell and hkl rings using parameters in the parameter files """ 
     c.parameters.loadparameters(parfile)
@@ -171,6 +173,7 @@ def get_uc(c, parfile):
     
     return uc, ds, hkls, tth_calc,wl
 
+# uc params
 def gethkl(cell,spg, sym, wl, dsmax=1.):
     """ return unique ds + hkl rings for a given space group + wavelength """
     u = unitcell.unitcell(cell,sym)
@@ -179,6 +182,8 @@ def gethkl(cell,spg, sym, wl, dsmax=1.):
     d = np.unique(d)
     return d, hkls
 
+
+# phase_dict: obsolete. Add new func to load from cif files
 def save_phase_dict(data_dict, file_path):
     """ save phase structure parameters dictionnary to hdf5
     dict is of the form dict{phase: values}, where values contains the following list of items: [plot_color, unit cell,
@@ -200,8 +205,11 @@ def save_phase_dict(data_dict, file_path):
                     group.create_dataset(datasets_names[i], data=np.string_(item))
                 else:
                     group.create_dataset(datasets_names[i], data=item, dtype = np.int32)
-                   
-                    
+     
+    return 
+
+
+#  phase_dict: obsolete                 
 def load_phase_dict(phase_dict_path):
     """ 
     load phase parameters from hdf5 and store them into a dictionnary of the form {phase: values} where each key is a phase name
@@ -226,9 +234,9 @@ def load_phase_dict(phase_dict_path):
         
     return phase_dict
 
-
+#  phase_dict: obsolete
 def add_phase_to_dict(phase_dict, save_path, phase_name, cell, spg, spg_no, sym, color, wl, tthmax= 25, overwrite=False):
-    """ add new phase to phase dict. By default, it will return assertion error if trying to overwrite a phase already present in phase_dict. to overwrite, set overwrite keyword to True """
+    """ add new phase to phase dict. By default, it will return assertion error if trying to overwrite a phase already present in ph phase_dict: obsoletease_dict. to overwrite, set overwrite keyword to True """
     
     # values to write
     if not os.path.exists(save_path) or overwrite:
@@ -248,6 +256,7 @@ def add_phase_to_dict(phase_dict, save_path, phase_name, cell, spg, spg_no, sym,
     return phase_dict
 
 
+# orix, phase_dict. obsolete. update to create orix phase from cif file
 def orix_phase_from_dict(phase_dict, phase_name):
     """ create orix Phase object using crystal structure data in phase_dict"""
     a, b, c, alpha, beta, gamma = [i for i in phase_dict[phase_name][1]]
@@ -259,22 +268,19 @@ def orix_phase_from_dict(phase_dict, phase_name):
 
     
 
-
-def update_colf_cell(cf, phase_dict, phase, mute=False):
-    """ update cf parameters with cell params (a, b, c, alpha, beta, gamma, sg, lattice) from phase in phase_dict """
-    uc = phase_dict[phase][1]
-    spg =  phase_dict[phase][2]
-    sym =  phase_dict[phase][4]
-
-    pars = [uc[0], uc[1], uc[2], uc[3], uc[4], uc[5], spg, sym]
+# uc params
+def update_colf_cell(cf, cell, spg, lattice_type, mute=False):
+    """ update cf parameters with cell params (a, b, c, alpha, beta, gamma, sg, lattice) """
+    uc = cell
+    pars = [uc[0], uc[1], uc[2], uc[3], uc[4], uc[5], spg, lattice_type]
     parnames = 'cell__a', 'cell__b', 'cell__c', 'cell_alpha', 'cell_beta', 'cell_gamma', 'cell_sg', 'cell_lattice_[P,A,B,C,I,F,R]'
 
     for p, n in zip(pars, parnames):
         cf.parameters.parameters[n] = p
     if not mute:
-        print('updated colfile parameters with cell parameters of phase ', phase)
+        print('updated colfile parameters')
 
-
+# colf utils
 def get_colf_size(cf):
     """ returns size in memory of a columnfile"""
     size_MB = sum([sys.getsizeof(cf[item]) for item in cf.keys()]) / (1024**2)
@@ -282,6 +288,7 @@ def get_colf_size(cf):
     return size_MB
 
 
+# colf update
 def merge_colf(c1, c2):
     """ merge two columnfiles with same columns (same ncols + colnames)"""
     titles = list(c1.keys())
@@ -295,6 +302,7 @@ def merge_colf(c1, c2):
     c_merged.set_bigarray( [ np.append(c1[t], c2[t]) for t in titles ] )    
     return c_merged
 
+# colf update
 def dropcolumn(cf, colname):
     """ remove column from colfile """
     assert colname in cf.titles
@@ -306,7 +314,7 @@ def dropcolumn(cf, colname):
     del cf
     return c_out
 
-
+# colf image reconstruction
 def iradon_recon(cf, obins, ybins, mask=None, doplot=True, weight_by_intensity=True,circle=True, norm=False, **kwargs):
     """
     compute (and plot) sinogram + reconstruction
@@ -360,7 +368,7 @@ def iradon_recon(cf, obins, ybins, mask=None, doplot=True, weight_by_intensity=T
 
     return sino, r
 
-
+# colf image reconstruction
 def friedel_recon(cf, xbins, ybins, doplot=True, mask=None, weight_by_intensity=True, norm=False, **kwargs):
     """
     compute (and plot) sinogram + reconstruction
@@ -397,6 +405,7 @@ def friedel_recon(cf, xbins, ybins, doplot=True, mask=None, weight_by_intensity=
     return r
 
 
+# colf update / utils
 def select_subset(c, selection_type = 'rectangle',
                   xmin=0, ymin=0, xmax=1, ymax=1,
                   xcenter=0, ycenter=0, r=1):
@@ -415,30 +424,46 @@ def select_subset(c, selection_type = 'rectangle',
 
     return mask
 
-
-def select_tth_rings(cf, tth_calc, tth_tol, tth_max = 20, doplot=True, usetthc = True, **kwargs):
-    """ select peaks within tth_tol distance from a list of hkl rings in tth histogram. useful to select specific phases.
-    If corrected tth (tthc) column is present, will try to use these instead of tth. can be avoided by setting usetthc to False"""
+# colf update / utils
+def select_tth_rings(cf, tth_calc, tth_tol, tth_max=20, is_sorted=False):
+    """ select peaks within tth_tol distance from a list of hkl rings in tth histogram. useful to select a specific phase.
+    If corrected tth (tthc) column is present, will try to use these instead of tth
+    arguments:
+    cf: colfile
+    tth_calc: array of tth position for hkl rings
+    tth_tol: tolerance in tth to select peaks around hkl rings
+    tth_max: max tth cutoff
+    is_sorted: if cf is already sorted in tth, can be set to True to avoid sorting it again"""
     
-    if 'tthc' in cf.titles and usetthc:
+    # use tth or tthc. Arrays need to be sorted on tth/tthc for indices selection
+    if 'tthc' in cf.titles:
+        if not is_sorted:
+            cf.sortby('tthc')
         tth = cf.tthc
     else:
+        if not is_sorted:
+            cf.sortby('tth')
         tth = cf.tth
-        
-    mhkl = np.asarray([abs(tth - (tth_calc[n])) < tth_tol for n in range(len(tth_calc)) if tth_calc[n] < tth_max ])
-    mhkl = np.any(mhkl, axis=0)
+
+    # initialize indices
+    inds = []
+    tth_max = min(tth_max, max(tth))
+    # scan each tth ring and select peaks
     
-    if doplot:
-        pl.figure()
-        pl.plot(tth, cf.eta,',', **kwargs)
-        pl.plot(tth[mhkl], cf.eta[mhkl],',', **kwargs)
-        pl.vlines(x = tth_calc, ymin = cf.eta.min(), ymax = cf.eta.max(), colors='r', lw = .5, alpha=.5)
-        pl.xlabel('tth')
-        pl.ylabel('eta')
-        
+    for hkl in tth_calc:
+        if hkl >= tth_max:
+            break
+        imin, imax = np.searchsorted(tth, hkl - tth_tol), np.searchsorted( tth, hkl + tth_tol)
+        inds.extend(np.r_[imin:imax])
+    inds = np.asarray(inds)
+
+    # transform indices to a bool array of len cf.nrows
+    mhkl = np.zeros(cf.nrows, dtype=bool)
+    mhkl[inds] = True
+
     return mhkl
 
-
+# colf utils
 def compute_kde(cf, ds, tthmin=0, tthmax=20, tth_step = 0.001, bw = 0.001, usetthc = True,
                 uself = True,  doplot=True, save = True, fname=None):
     """ compute kernel density estimate of cf.tth weighted by intensity to get a 1d XRD profile, that can further be used for phase identification, refinment of cell parameters,etc.
@@ -497,7 +522,7 @@ def compute_kde(cf, ds, tthmin=0, tthmax=20, tth_step = 0.001, bw = 0.001, usett
     
     return x, pdf
 
-
+# colf update / utils. obsolete? (may use xi,yi indexing with different pixelsize instead -> pixelmap)
 def split_xy_chunks(cf,ds, nx, ny, doplot=True):
     """ using relocated peak sources position (xs,ys) from friedel pairs, split data into x,y chunks
     nx, ny: number of chunks along x and y directions in the sample """
@@ -532,6 +557,83 @@ def split_xy_chunks(cf,ds, nx, ny, doplot=True):
     return cf, chunks
 
 
+# pixelmap utils
+def xyi(xi, yi):
+    """ returns xyi from xi,yi coordinates"""
+    return int(xi+1000*yi)
+
+# pixelmap utils
+def pks_from_neighbour_pixels(cf, xp, yp, n_px=1):
+    # find peaks in pixels neighbouring pixel (xp,yp). n_px: control selection size. n_px=1 -> 3x3 pixel domain selected; n_px=2 -> 5x5 etc.
+    xyi_p = xyi(xp,yp)  # xyi coord
+    xmax, ymax = cf.xi.max(), cf.yi.max()  # map boundary
+    
+    # x,y index of pixel to select
+    x_range = np.arange(max(xp-n_px,0), min(xp+n_px+1,xmax))
+    y_range = np.arange(max(yp-n_px,0), min(yp+n_px+1,ymax))
+    
+    pks_sel = []
+    for i in x_range:
+        for j in y_range:
+            start, end = np.searchsorted(cf.xyi, (xyi(i,j), xyi(i,j)+1))
+            pks = np.arange(start, end, dtype='int')
+            
+            pks_sel = np.append(pks_sel,pks).astype(int)
+    
+    return pks_sel
+
+#pixelmap utils
+def pks_from_neighbour_pixels_fast(cf, xp, yp, xymax):
+    # faster variant of pks_from_neighbour_pixels, but can only select 3x3 domain 
+    xyi_p = xyi(xp,yp)  # xyi coord    
+
+    s1, e1, s2, e2, s3, e3 = np.searchsorted(cf.xyi, (max(xyi_p-1001,0), max(xyi_p-998,0),
+                                                      max(xyi_p-1,0), min(xyi_p+2,xymax),
+                                                      min(xyi_p+999,xymax), min(xyi_p+1002,xymax) ) )
+    
+    pks = np.concatenate((np.arange(s1, e1, dtype='int'),
+                          np.arange(s2, e2, dtype='int'),
+                          np.arange(s3, e3, dtype='int')))
+    return pks
+
+# pixelmap utils
+def load_pixelmap(h5name):
+    h5pixelmap = {}
+    phaseIds = {}
+    
+    with h5py.File(h5name,'r') as hin:
+        # load phase dict
+        for key,val in list(hin['phases'].items()):
+            phaseIds[val[()]] = key
+        # sort dict by phase id
+        sortedkeys = sorted(list(phaseIds.keys()))
+        phaseIds = {i: phaseIds[i] for i in sortedkeys}
+        
+        # load data dict
+        h5pixelmap = {}
+        for item in list(hin['data'].keys()):
+            h5pixelmap[item] = np.asarray(hin['data'][item][()])
+            
+        # load grid
+        xb = hin['grid/X_bins'][()]
+        yb = hin['grid/Y_bins'][()]
+        
+        # return grid in pixel coordinates as well
+        xb_px = len(xb) * (xb - xb.min()) // (xb.max() - xb.min())
+        yb_px = len(yb) * (yb - yb.min()) // (yb.max() - yb.min())
+        xb_px, yb_px = xb_px.astype(int), yb_px.astype(int)
+        
+        xy_grid = {'xb':xb, 'yb':yb, 'xb_px':xb_px, 'yb_px':yb_px}
+        
+    return phaseIds, h5pixelmap, xy_grid
 
 
+# to add to pixelmap: 
+###################
+# save pixelmap to hdf5
+#      - create pixelmap (phaseIds, grid, data: X, Y, PhaseId, Qi
+#      - update_with_orientations: data: U, UBI, etc.
+# convert pixelmap to orix crystalmap
+# index_phase_to_pixel(args=(cf_to_index, xi, yi, minpks))  from 005_label_pixelmap
+# find_pixel_orientations(args=(to_index, xi, yi, etc.))    from 006_index_pixelmap
 
