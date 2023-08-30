@@ -1,23 +1,26 @@
-import os, sys
-import numpy as np, pylab as pl, math as m, h5py
+import os, sys, h5py
+import numpy as np, pylab as pl, math as m
+
 import fast_histogram
 import skimage.transform
-import scipy.spatial
+import scipy.spatial, scipy.signal
 from scipy.stats import gaussian_kde
 
 from ImageD11 import unitcell, blobcorrector, columnfile, transform, sparseframe, cImageD11, refinegrains
 from ImageD11.grain import grain, write_grain_file, read_grain_file
-from ImageD11.indexing import indexer
 from ImageD11.blobcorrector import eiger_spatial
 
-from diffpy.structure import Atom, Lattice, Structure
-from orix.crystal_map import Phase 
+import diffpy.structure
+import orix.crystal_map as ocm 
+import Dans_Diffraction as dif
 
 
 
-# General functions to do some operations on imageD11 columnfiles
+# This modules groups general customized functions to work on imageD11 columnfiles. Many functions in friedel_pairs.py, pixelmap.py and grainmapping.py depend on this module
 
-# colf conv
+
+# columnfile conversion: to/from dict export to hdf5, etc.. Mostly customized functions derived from ImageD11.columnfile.py
+########################################################################################
 def colf_to_dict(cf):
     "converts ImageD11 columnfile to python dictionnary"""
     keys = cf.titles
@@ -25,21 +28,22 @@ def colf_to_dict(cf):
     cf_dict = dict(zip(keys, cols))
     return cf_dict
 
-#divers
-def rnd( a, p, t):
-    if p == 0:
-        return a.astype(t)
-    # hack to try to get floats to compress better. Round to nearest integer p
-    a = (np.round(a*pow(2,p)).astype(int).astype(t))/pow(2,p)
-    return a
+def colf_from_dict( pks ):
+    """Convert a dictionary of numpy arrays to columnfile """
+    titles = list(pks.keys())
+    nrows = len(pks[titles[0]])
+    for t in titles:
+        assert len(pks[t]) == nrows, t
+    colf = columnfile.newcolumnfile( titles=titles )
+    colf.nrows = nrows
+    colf.set_bigarray( [ pks[t] for t in titles ] )
+    return colf
 
-
-# colf conv
 def colf_to_hdf( colfile, hdffile, save_mode='minimal', name=None, compression='lzf', compression_opts=None):
     
         """
-        Copy a columnfile into hdf file. Modified from ImageD11.columnfile.colfile_to_hdf
-        saving options: minimal: saves only necessary information that cannot be computed with updategeometry() (default); 
+        Saves columnfile to hdf5. Modified from ImageD11.columnfile.colfile_to_hdf
+        saving options: minimal: saves only necessary information that cannot be computed with updateGeometry() (default); 
         full: saves all columns 
         """  
         # LIST OF COLUMNS TO SAVE AS INTEGERS. UPDATED FROM IMAGED11
@@ -110,33 +114,21 @@ def colf_to_hdf( colfile, hdffile, save_mode='minimal', name=None, compression='
         if opened:
             h.close()
             
-            
-# colf conv                 
+
 def pkstocolf( pkd , parfile, 
             dxfile="/data/id11/nanoscope/Eiger/spatial_20210415_JW/e2dx.edf",
             dyfile="/data/id11/nanoscope/Eiger/spatial_20210415_JW/e2dy.edf",
           ):
-    """ Converts a dictionary of peaks saved in pkstable into and ImageD11 columnfile
-    adds on the geometric computations (tth, eta, gvector, etc) """
+    """ Converts a dictionary of peaks saved in pkstable into and ImageD11 columnfile adds on the geometric computations (tth, eta, gvector, etc) """
     spat = eiger_spatial( dxfile = dxfile, dyfile = dyfile )
     cf = columnfile.colfile_from_dict( spat( pkd ) )
     cf.parameters.loadparameters(parfile)
     cf.updateGeometry()
     return cf
-            
-# colf conv
-def colfile_from_dict( pks ):
-    """Convert a dictionary of numpy arrays to columnfile """
-    titles = list(pks.keys())
-    nrows = len(pks[titles[0]])
-    for t in titles:
-        assert len(pks[t]) == nrows, t
-    colf = columnfile.newcolumnfile( titles=titles )
-    colf.nrows = nrows
-    colf.set_bigarray( [ pks[t] for t in titles ] )
-    return colf
 
-# colf update
+
+# Geometric corrections (using detector info), updates on columnfile parameters, load structure data
+########################################################################################
 def fix_flt( c, cor, parfile ):
     """ 
     spline correction for ImageD11 columnfile
@@ -154,7 +146,6 @@ def fix_flt( c, cor, parfile ):
     c.updateGeometry()
     return c
 
-# uc params
 def get_uc(c, parfile):
     """ computes unitcell and hkl rings using parameters in the parameter files """ 
     c.parameters.loadparameters(parfile)
@@ -173,7 +164,7 @@ def get_uc(c, parfile):
     
     return uc, ds, hkls, tth_calc,wl
 
-# uc params
+
 def gethkl(cell,spg, sym, wl, dsmax=1.):
     """ return unique ds + hkl rings for a given space group + wavelength """
     u = unitcell.unitcell(cell,sym)
@@ -183,94 +174,8 @@ def gethkl(cell,spg, sym, wl, dsmax=1.):
     return d, hkls
 
 
-# phase_dict: obsolete. Add new func to load from cif files
-def save_phase_dict(data_dict, file_path):
-    """ save phase structure parameters dictionnary to hdf5
-    dict is of the form dict{phase: values}, where values contains the following list of items: [plot_color, unit cell,
-    space group (spg), space group nb (spg_no), symmetry (sym), ds_rings, tth_rings] for a specific phase
-    """
-    with h5py.File(file_path, 'w') as f:
-        
-        datasets_names = ['plot_color', 'cell', 'spg', 'spg_no', 'sym', 'ds_rings', 'tth_rings']
-        
-        for key, value in data_dict.items():
-            group = f.create_group(key)
-            for i, item in enumerate(value):
-                if isinstance(item, list):
-                    item = np.array(item, dtype=np.float32)  # convert cell list to np array
-                
-                if isinstance(item, np.ndarray):
-                    group.create_dataset(datasets_names[i], data=item, dtype = np.float32)
-                elif isinstance(item, str):
-                    group.create_dataset(datasets_names[i], data=np.string_(item))
-                else:
-                    group.create_dataset(datasets_names[i], data=item, dtype = np.int32)
-     
-    return 
-
-
-#  phase_dict: obsolete                 
-def load_phase_dict(phase_dict_path):
-    """ 
-    load phase parameters from hdf5 and store them into a dictionnary of the form {phase: values} where each key is a phase name
-    and values is a list of params: ['plot_color', 'cell', 'spg', 'spg_no', 'sym', 'ds_rings', 'tth_rings']
-    """
-
-    with h5py.File(phase_dict_path,'r') as hin:
-        phases = list(hin.keys())
-        dataset_names = ['plot_color', 'cell', 'spg', 'spg_no', 'sym', 'ds_rings', 'tth_rings']
-        
-        phase_dict = {}
-        
-        for p in phases:
-            data = []
-            for dsn in dataset_names:
-                if isinstance(hin[p][dsn][()], bytes):
-                    data.append(hin[p][dsn][()].decode())
-                else:
-                    data.append(hin[p][dsn][()])
-            
-            phase_dict[p] = data
-        
-    return phase_dict
-
-#  phase_dict: obsolete
-def add_phase_to_dict(phase_dict, save_path, phase_name, cell, spg, spg_no, sym, color, wl, tthmax= 25, overwrite=False):
-    """ add new phase to phase dict. By default, it will return assertion error if trying to overwrite a phase already present in ph phase_dict: obsoletease_dict. to overwrite, set overwrite keyword to True """
-    
-    # values to write
-    if not os.path.exists(save_path) or overwrite:
-        d,_ = gethkl(cell,spg, sym, wl, dsmax=2/wl * np.sin(np.radians(tthmax)/2))
-        t = 2 * np.arcsin( wl*d/2 )*180/np.pi
-        values = [color, cell, spg, spg_no, sym, d, t]
-        
-    if os.path.exists(save_path):
-        if not overwrite:
-            assert phase_name not in phase_dict.keys()
-    else:
-        phase_dict = {}
-        
-    phase_dict[phase_name] = values
-    save_phase_dict(phase_dict, save_path)
-    
-    return phase_dict
-
-
-# orix, phase_dict. obsolete. update to create orix phase from cif file
-def orix_phase_from_dict(phase_dict, phase_name):
-    """ create orix Phase object using crystal structure data in phase_dict"""
-    a, b, c, alpha, beta, gamma = [i for i in phase_dict[phase_name][1]]
-    
-    orix_phase = Phase(space_group = int(phase_dict[phase_name][3]),
-                       structure = Structure(title=phase_name,
-                                             lattice=Lattice(a,b,c,alpha,beta,gamma)))
-    return orix_phase
-
-    
-
-# uc params
 def update_colf_cell(cf, cell, spg, lattice_type, mute=False):
-    """ update cf parameters with cell params (a, b, c, alpha, beta, gamma, sg, lattice) """
+    """ update cf parameters with cell params and crystal symmetry (a, b, c, alpha, beta, gamma, sg, lattice) """
     uc = cell
     pars = [uc[0], uc[1], uc[2], uc[3], uc[4], uc[5], spg, lattice_type]
     parnames = 'cell__a', 'cell__b', 'cell__c', 'cell_alpha', 'cell_beta', 'cell_gamma', 'cell_sg', 'cell_lattice_[P,A,B,C,I,F,R]'
@@ -279,16 +184,17 @@ def update_colf_cell(cf, cell, spg, lattice_type, mute=False):
         cf.parameters.parameters[n] = p
     if not mute:
         print('updated colfile parameters')
+        
 
-# colf utils
-def get_colf_size(cf):
-    """ returns size in memory of a columnfile"""
-    size_MB = sum([sys.getsizeof(cf[item]) for item in cf.keys()]) / (1024**2)
-    print('Total size = ', round(size_MB,2), 'MB')
-    return size_MB
+def get_Xray_energy(wl):
+    """ return x-ray energy (kev) from wavelength """
+    E_kev = 6.62607015e-34*2.99792e8/(wl*1e-10) / 1.60218e-19 / 1e3
+    return E_kev
 
 
-# colf update
+
+# Operations on columnfiles: drop column, merge two columnfiles, get columnfile size in memory 
+########################################################################################
 def merge_colf(c1, c2):
     """ merge two columnfiles with same columns (same ncols + colnames)"""
     titles = list(c1.keys())
@@ -314,15 +220,183 @@ def dropcolumn(cf, colname):
     del cf
     return c_out
 
-# colf image reconstruction
+
+def get_colf_size(cf, out=False):
+    """ returns memory taken by the columnfile when loaded"""
+    size_MB = sum([sys.getsizeof(cf[item]) for item in cf.keys()]) / (1024**2)
+    print('Total size = ', round(size_MB,2), 'MB')
+    if out:
+        return size_MB
+    
+
+def select_subset(c, selection_type = 'rectangle',
+                  xmin=0, ymin=0, xmax=1, ymax=1,
+                  xcenter=0, ycenter=0, r=1):
+    """
+    select subset of peaks based on position on the map. Columnfile must contain xs, ys columns, obtained from Friedel pairing
+    choose either rectangular selection with xmin, ymin, xmax, ymax or circle selection with xcenter, ycenter, radius
+    """
+    assert selection_type in ['rectangle', 'circle']
+    
+    if selection_type == 'rectangle':
+        assert all([xmin < xmax, ymin < ymax])
+        mask = np.all([c.xs <= xmax, c.xs >= xmin, c.ys <= ymax, c.ys >= ymin], axis=0)
+        
+    else:
+        mask = (c.xs - xcenter)**2 + (c.ys - ycenter)**2 <= r**2
+
+    return mask
+
+
+def select_tth_rings(cf, tth_calc, tth_tol, tth_max=20, is_sorted=False):
+    """ select all peaks within tth_tol distance from a list of hkl rings. useful to select a specific phase from its hkl rings positions.
+    If corrected tth (tthc) column is present, will try to use these instead of tth
+    arguments:
+    cf: colfile
+    tth_calc: array of tth position for hkl rings
+    tth_tol: tolerance in tth to select peaks around hkl rings
+    tth_max: max tth cutoff
+    is_sorted: if cf is already sorted on tth, can be set to True to avoid sorting it again"""
+    
+    # use tth or tthc. Arrays need to be sorted on tth/tthc for indices selection
+    if 'tthc' in cf.titles:
+        if not is_sorted:
+            cf.sortby('tthc')
+        tth = cf.tthc
+    else:
+        if not is_sorted:
+            cf.sortby('tth')
+        tth = cf.tth
+
+    # initialize indices
+    inds = []
+    tth_max = min(tth_max, max(tth))
+    # scan each tth ring and select peaks
+    
+    for hkl in tth_calc:
+        if hkl >= tth_max:
+            break
+        imin, imax = np.searchsorted(tth, hkl - tth_tol), np.searchsorted( tth, hkl + tth_tol)
+        inds.extend(np.r_[imin:imax])
+    inds = np.asarray(inds)
+
+    # transform indices to a bool array of len cf.nrows
+    mhkl = np.zeros(cf.nrows, dtype=bool)
+    mhkl[inds] = True
+
+    return mhkl
+
+
+def compute_kde(cf, ds, tthmin=0, tthmax=20, npks_max = 1e6, tth_step = 0.001, bw = 0.001, usetthc = True,
+                uself = True,  doplot=True, save = True, fname=None):
+    """ compute kernel density estimate of cf.tth weighted by intensity to get a XRD spectrum like in powder diffraction.
+    cf, ds: columnfile + ImageD11 dataset object
+    npks_max: max number of peaks to use to compute kde. For large datasets, kde computation can be prohibitively long, so instead of using the full columnfile, kde is computed from a random subset of N peaks from the columnfile
+    tthmin, tthmax, tthstep: range and sampling density for kde computation
+    bw : kde bandwidth
+    usetthc : use Friedel pair corrected tth. default is True
+    uself: use Lorentz scaling factor for intensity:  L( theta,eta ) = sin( 2*theta )*|sin( eta )| (Poulsen 2004) """
+    
+    # downsample cf if nrows > npks_max
+    rnd_msk = np.full(cf.nrows, True)  # initialize random mask
+    if cf.nrows > npks_max:
+        p = npks_max/cf.nrows
+        rnd_msk = np.random.choice(a=[True, False], size=cf.nrows, p=[p, 1-p])  
+    
+    # select tth col + range
+    if usetthc is True:
+        msk = np.all([cf.tthc <= tthmax, cf.tthc >= tthmin, rnd_msk], axis=0)
+        tth = cf.tthc[msk]
+    else: 
+        msk = np.all([cf.tth <= tthmax, cf.tth >= tthmin, rnd_msk], axis=0)
+        tth = cf.tth[msk]
+    
+    #Lorentz factor for intensity correction
+    if uself is True:
+        cor_I = cf.sum_intensity[msk] * (np.exp( cf.ds[msk]*cf.ds[msk]*0.2 ) )
+        lf = refinegrains.lf(tth, cf.eta[msk])
+        cor_I *= lf
+        
+    # compute kde
+    print('computing kde. This may take a while...')
+    kde = gaussian_kde(tth, bw_method=bw, weights=cor_I)
+
+    # resample tth values with given tth_step
+    x = np.arange(tth.min(),tth.max(),tth_step)
+    pdf = kde.pdf(x)
+
+    # plot kde
+    if doplot:
+        fig = pl.figure(figsize=(10,5))
+        fig.add_subplot(111)
+        pl.hist(tth, bins=x, weights=cor_I,density=True);
+        pl.plot(x, pdf, '-', linewidth=1., label='bw = ' +str(bw))
+        pl.xlim(tthmin, tthmax)
+        pl.xlabel('tth (deg)')
+        pl.legend()
+        pl.title('Integrated intensity profile - '+ds.dsname)
+        pl.show()
+        if save:
+            fig.savefig(ds.datapath+'_kde.png', format='png')
+        
+    if save:
+        if fname is None:
+            fname = ds.datapath+'_bw'+str(bw)+'_kde.txt'
+        f = open(fname,'w')
+        for l in range(len(x)):
+            if format(pdf[l],'.4f') == '0.0000':    # replace zeros by 0.0001 to avoid crashes with profex
+                f.write(format(x[l],'.4f')+' '+'0.0001'+'\n')
+            else:
+                f.write(format(x[l],'.4f')+' '+format(pdf[l],'.4f')+'\n')
+        f.close()
+    
+    return x, pdf
+
+
+def split_xy_chunks(cf,ds, nx, ny, doplot=True):
+    """ using relocated peak position (xs,ys) from friedel pairs, split data into x,y chunks
+    nx, ny: number of chunks along x and y directions in the sample """
+    # bins for chunking
+    xbins = np.linspace(ds.ybinedges.min(), ds.ybinedges.max(), nx+1)
+    ybins = np.linspace(ds.ybinedges.min(), ds.ybinedges.max(), ny+1)
+    
+    cf.setcolumn(-1*(np.ones_like(cf.fp_id)), 'chunk_id')
+    chunk_labels = np.arange(nx*ny)
+    
+    # chunk splitting
+    chunks = {}
+    for chk in tqdm.tqdm(chunk_labels):
+        row = chk // nx
+        col = chk % nx
+        
+        # x-y coords of chunk. return them as a dict
+        xmin, xmax, ymin, ymax = xbins[col], xbins[col+1], ybins[row], ybins[row+1]
+        chunks[chk] = [( xmin, xmax, ymin, ymax )]
+
+        msk = select_subset(cf, 'rectangle', xmin, ymin, xmax, ymax)
+        cf.chunk_id[msk] = chk
+    
+    if doplot:
+        fpr = friedel_recon(cf, ds.ybinedges, ds.ybinedges,doplot=False, mask=None, weight_by_intensity=True, norm=True)
+        pl.figure()
+        pl.pcolormesh(ds.ybinedges, ds.ybinedges,fpr, cmap='Greys_r')
+        pl.hlines(y = ybins[1:-1], xmin = min(xbins), xmax = max(xbins), colors='red', alpha=.8)
+        pl.vlines(x = xbins[1:-1], ymin = min(ybins), ymax = max(ybins), colors='red', alpha=.8)
+        pl.xlabel('x mm')
+        pl.ylabel('y mm')
+    return cf, chunks
+
+    
+# Image reconstruction: do filtered back projection or use friedel pairs to reconstruct a 2D image of the sample
+########################################################################################
 def iradon_recon(cf, obins, ybins, mask=None, doplot=True, weight_by_intensity=True,circle=True, norm=False, **kwargs):
     """
-    compute (and plot) sinogram + reconstruction
+    compute sinogram + filtered back_projection reconstruction
     Input : cf = imageD11 columnfile that must contain dty and omega columns
     obins = bins array for omega  # use obinedges!
-    ybins = bins array for dty,   # use ybindedges
-    mask  = boolean array of len cf.nrows to filter data (default = None), plot : flag to choose whether to plot the data or just return the output 
-     weights_by_intensity : weights peak peaks by intensity in the histogram. Intensity defined as log(e+sumI). default is True
+    ybins = bins array for dty,   # use ybindedges!
+    mask  = boolean array of len cf.nrows to filter data (default = None), plot : flag to choose whether to plot the data or just return the output as a 2D array
+     weights_by_intensity : weights peak peaks by intensity in the 2D-histogram. Intensity defined as log(e+sumI). default is True
      norm : normalize sinogram. Default is false
     """
     if mask is None :
@@ -368,10 +442,10 @@ def iradon_recon(cf, obins, ybins, mask=None, doplot=True, weight_by_intensity=T
 
     return sino, r
 
-# colf image reconstruction
+
 def friedel_recon(cf, xbins, ybins, doplot=True, mask=None, weight_by_intensity=True, norm=False, **kwargs):
     """
-    compute (and plot) sinogram + reconstruction
+    Image reconstruction using peaks position in the sample calculated with friedel pairs
     Input : cf = imageD11 columnfile that must contain dty and omega columns, obins = bins array for omega, ybins = bins array for dty,
     mask  = boolean array of len cf.nrows to filter data (default = None), plot : flag to choose whether to plot the data or just return the output 
     weights_by_intensity : weights peak peaks by intensity in the histogram. Intensity defined as log(e+sumI). default is True
@@ -405,235 +479,8 @@ def friedel_recon(cf, xbins, ybins, doplot=True, mask=None, weight_by_intensity=
     return r
 
 
-# colf update / utils
-def select_subset(c, selection_type = 'rectangle',
-                  xmin=0, ymin=0, xmax=1, ymax=1,
-                  xcenter=0, ycenter=0, r=1):
-    """
-    select subset of peaks based on position on the map. Columnfile must contain xs, ys columns, obtained from Friedel pairing
-    choose either rectangular selection with xmin, ymin, xmax, ymax or circle selection with xcenter, ycenter, radius
-    """
-    assert selection_type in ['rectangle', 'circle']
-    
-    if selection_type == 'rectangle':
-        assert all([xmin < xmax, ymin < ymax])
-        mask = np.all([c.xs <= xmax, c.xs >= xmin, c.ys <= ymax, c.ys >= ymin], axis=0)
-        
-    else:
-        mask = (c.xs - xcenter)**2 + (c.ys - ycenter)**2 <= r**2
-
-    return mask
-
-# colf update / utils
-def select_tth_rings(cf, tth_calc, tth_tol, tth_max=20, is_sorted=False):
-    """ select peaks within tth_tol distance from a list of hkl rings in tth histogram. useful to select a specific phase.
-    If corrected tth (tthc) column is present, will try to use these instead of tth
-    arguments:
-    cf: colfile
-    tth_calc: array of tth position for hkl rings
-    tth_tol: tolerance in tth to select peaks around hkl rings
-    tth_max: max tth cutoff
-    is_sorted: if cf is already sorted in tth, can be set to True to avoid sorting it again"""
-    
-    # use tth or tthc. Arrays need to be sorted on tth/tthc for indices selection
-    if 'tthc' in cf.titles:
-        if not is_sorted:
-            cf.sortby('tthc')
-        tth = cf.tthc
-    else:
-        if not is_sorted:
-            cf.sortby('tth')
-        tth = cf.tth
-
-    # initialize indices
-    inds = []
-    tth_max = min(tth_max, max(tth))
-    # scan each tth ring and select peaks
-    
-    for hkl in tth_calc:
-        if hkl >= tth_max:
-            break
-        imin, imax = np.searchsorted(tth, hkl - tth_tol), np.searchsorted( tth, hkl + tth_tol)
-        inds.extend(np.r_[imin:imax])
-    inds = np.asarray(inds)
-
-    # transform indices to a bool array of len cf.nrows
-    mhkl = np.zeros(cf.nrows, dtype=bool)
-    mhkl[inds] = True
-
-    return mhkl
-
-# colf utils
-def compute_kde(cf, ds, tthmin=0, tthmax=20, tth_step = 0.001, bw = 0.001, usetthc = True,
-                uself = True,  doplot=True, save = True, fname=None):
-    """ compute kernel density estimate of cf.tth weighted by intensity to get a 1d XRD profile, that can further be used for phase identification, refinment of cell parameters,etc.
-    cf, ds: columnfile + dataset file
-    tthmin, tthmax, tthstep: range for kde computation
-    bw : kde bandwidth
-    usetthc : use Friedel pair corrected tth. default is True
-    uself: use Lorentz scaling factor for intensity:  L( theta,eta ) = sin( 2*theta )*|sin( eta )| (Poulsen 2004) """
-    
-    # select tth col + range
-    if usetthc is True:
-        msk = np.all([cf.tthc <= tthmax, cf.tthc >= tthmin], axis=0)
-        tth = cf.tthc[msk]
-    else: 
-        msk = np.all([cf.tth <= tthmax, cf.tth >= tthmin], axis=0)
-        tth = cf.tth[msk]
-    
-    #Lorentz factor for intensity correction
-    if uself is True:
-        cor_I = cf.sum_intensity[msk] * (np.exp( cf.ds[msk]*cf.ds[msk]*0.2 ) )
-        lf = refinegrains.lf(tth, cf.eta[msk])
-        cor_I *= lf
-        
-    # compute kde
-    print('computing kde. This may take a while...')
-    kde = gaussian_kde(tth, bw_method=bw, weights=cor_I)
-
-    # resample tth values with given tth_step
-    x = np.arange(tth.min(),tth.max(),tth_step)
-    pdf = kde.pdf(x)
-
-    # plot kde
-    if doplot:
-        fig = pl.figure(figsize=(10,5))
-        fig.add_subplot(111)
-        pl.hist(tth, bins=x, weights=cor_I,density=True);
-        pl.plot(x, pdf, '-', linewidth=1., label='bw = ' +str(bw))
-        pl.xlim(tthmin, tthmax)
-        pl.xlabel('tth (deg)')
-        pl.legend()
-        pl.title('Integrated intensity profile - '+ds.dsname)
-        pl.show()
-        if save:
-            fig.savefig(ds.datapath+'_kde.png', format='png')
-        
-    if save:
-        if fname is None:
-            fname = ds.datapath+'_bw'+str(bw)+'_kde.txt'
-        f = open(fname,'w')
-        for l in range(len(x)):
-            if format(pdf[l],'.4f') == '0.0000':    # replace zeros by 0.0001 to avoid crashes with profex
-                f.write(format(x[l],'.4f')+' '+'0.0001'+'\n')
-            else:
-                f.write(format(x[l],'.4f')+' '+format(pdf[l],'.4f')+'\n')
-        f.close()
-    
-    return x, pdf
-
-# colf update / utils. obsolete? (may use xi,yi indexing with different pixelsize instead -> pixelmap)
-def split_xy_chunks(cf,ds, nx, ny, doplot=True):
-    """ using relocated peak sources position (xs,ys) from friedel pairs, split data into x,y chunks
-    nx, ny: number of chunks along x and y directions in the sample """
-    # bins for chunking
-    xbins = np.linspace(ds.ybinedges.min(), ds.ybinedges.max(), nx+1)
-    ybins = np.linspace(ds.ybinedges.min(), ds.ybinedges.max(), ny+1)
-    
-    cf.setcolumn(-1*(np.ones_like(cf.fp_id)), 'chunk_id')
-    chunk_labels = np.arange(nx*ny)
-    
-    # chunk splitting
-    chunks = {}
-    for chk in tqdm.tqdm(chunk_labels):
-        row = chk // nx
-        col = chk % nx
-        
-        # x-y coords of chunk. return them as a dict
-        xmin, xmax, ymin, ymax = xbins[col], xbins[col+1], ybins[row], ybins[row+1]
-        chunks[chk] = [( xmin, xmax, ymin, ymax )]
-
-        msk = select_subset(cf, 'rectangle', xmin, ymin, xmax, ymax)
-        cf.chunk_id[msk] = chk
-    
-    if doplot:
-        fpr = friedel_recon(cf, ds.ybinedges, ds.ybinedges,doplot=False, mask=None, weight_by_intensity=True, norm=True)
-        pl.figure()
-        pl.pcolormesh(ds.ybinedges, ds.ybinedges,fpr, cmap='Greys_r')
-        pl.hlines(y = ybins[1:-1], xmin = min(xbins), xmax = max(xbins), colors='red', alpha=.8)
-        pl.vlines(x = xbins[1:-1], ymin = min(ybins), ymax = max(ybins), colors='red', alpha=.8)
-        pl.xlabel('x mm')
-        pl.ylabel('y mm')
-    return cf, chunks
 
 
-# pixelmap utils
-def xyi(xi, yi):
-    """ returns xyi from xi,yi coordinates"""
-    return int(xi+1000*yi)
-
-# pixelmap utils
-def pks_from_neighbour_pixels(cf, xp, yp, n_px=1):
-    # find peaks in pixels neighbouring pixel (xp,yp). n_px: control selection size. n_px=1 -> 3x3 pixel domain selected; n_px=2 -> 5x5 etc.
-    xyi_p = xyi(xp,yp)  # xyi coord
-    xmax, ymax = cf.xi.max(), cf.yi.max()  # map boundary
-    
-    # x,y index of pixel to select
-    x_range = np.arange(max(xp-n_px,0), min(xp+n_px+1,xmax))
-    y_range = np.arange(max(yp-n_px,0), min(yp+n_px+1,ymax))
-    
-    pks_sel = []
-    for i in x_range:
-        for j in y_range:
-            start, end = np.searchsorted(cf.xyi, (xyi(i,j), xyi(i,j)+1))
-            pks = np.arange(start, end, dtype='int')
-            
-            pks_sel = np.append(pks_sel,pks).astype(int)
-    
-    return pks_sel
-
-#pixelmap utils
-def pks_from_neighbour_pixels_fast(cf, xp, yp, xymax):
-    # faster variant of pks_from_neighbour_pixels, but can only select 3x3 domain 
-    xyi_p = xyi(xp,yp)  # xyi coord    
-
-    s1, e1, s2, e2, s3, e3 = np.searchsorted(cf.xyi, (max(xyi_p-1001,0), max(xyi_p-998,0),
-                                                      max(xyi_p-1,0), min(xyi_p+2,xymax),
-                                                      min(xyi_p+999,xymax), min(xyi_p+1002,xymax) ) )
-    
-    pks = np.concatenate((np.arange(s1, e1, dtype='int'),
-                          np.arange(s2, e2, dtype='int'),
-                          np.arange(s3, e3, dtype='int')))
-    return pks
-
-# pixelmap utils
-def load_pixelmap(h5name):
-    h5pixelmap = {}
-    phaseIds = {}
-    
-    with h5py.File(h5name,'r') as hin:
-        # load phase dict
-        for key,val in list(hin['phases'].items()):
-            phaseIds[val[()]] = key
-        # sort dict by phase id
-        sortedkeys = sorted(list(phaseIds.keys()))
-        phaseIds = {i: phaseIds[i] for i in sortedkeys}
-        
-        # load data dict
-        h5pixelmap = {}
-        for item in list(hin['data'].keys()):
-            h5pixelmap[item] = np.asarray(hin['data'][item][()])
-            
-        # load grid
-        xb = hin['grid/X_bins'][()]
-        yb = hin['grid/Y_bins'][()]
-        
-        # return grid in pixel coordinates as well
-        xb_px = len(xb) * (xb - xb.min()) // (xb.max() - xb.min())
-        yb_px = len(yb) * (yb - yb.min()) // (yb.max() - yb.min())
-        xb_px, yb_px = xb_px.astype(int), yb_px.astype(int)
-        
-        xy_grid = {'xb':xb, 'yb':yb, 'xb_px':xb_px, 'yb_px':yb_px}
-        
-    return phaseIds, h5pixelmap, xy_grid
 
 
-# to add to pixelmap: 
-###################
-# save pixelmap to hdf5
-#      - create pixelmap (phaseIds, grid, data: X, Y, PhaseId, Qi
-#      - update_with_orientations: data: U, UBI, etc.
-# convert pixelmap to orix crystalmap
-# index_phase_to_pixel(args=(cf_to_index, xi, yi, minpks))  from 005_label_pixelmap
-# find_pixel_orientations(args=(to_index, xi, yi, etc.))    from 006_index_pixelmap
 
