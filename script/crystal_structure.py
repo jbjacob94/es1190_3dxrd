@@ -37,7 +37,10 @@ class CS:
     def add_data_from_cif(self):
         """import structure information from cif file and compute different properties.
         Requires diffpy.structure and Dans_diffraction modules
-        lot of overlap between str_dans and str_diffpy, but these two objects do not contain exactly the same info and one or the other is needed depending on what you want to do. To create an orix Phase object (needed to get ipfkey, plot crystalmap etc.), only str_diffpy works, while str_dans can be used to compute powder pattern with Dans_diffraction package"""
+        There is significant overlap between str_dans and str_diffpy, but these two objects do not contain exactly the same information and one or the other is needed depending on what you want
+        to do. To create an orix Phase object (needed to get ipfkey, plot crystalmap etc.), only str_diffpy works. str_dans has lot of useful features, including computation of the theoretical
+        powder pattern of a given crystal structure."""
+        
         if not os.path.exists(self.cif_path):
             print('incorrect path for crystal structure file')
         
@@ -95,7 +98,6 @@ class CS:
         except:
             print('No spectrum data. Compute powder spectrum first')
         
-        
         pksindx, pksI = scipy.signal.find_peaks(I, height=Imin)
         pks = tth[pksindx].tolist()
         pksI = list(pksI.values())[0].tolist()  # pksI returned in a dict. convert it to an array
@@ -119,8 +121,7 @@ class CS:
             pl.ylabel('normalized Intensity')
             pl.title('strongest diffraction peaks - ' + self.name)
             
-
-    
+  
 def load_CS_from_cif(cif_path, name='', pid = -1):
     """ create a CS object directly from cif file"""
     cs = CS(name, pid, cif_path)
