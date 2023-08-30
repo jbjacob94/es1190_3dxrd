@@ -1,7 +1,9 @@
-import os, sys, numpy as np, pylab as pl, math as m, h5py
+import os, sys, h5py
+import numpy as np, pylab as pl, math as m
 import tqdm, timeit
 import fast_histogram
 from multiprocessing import Pool
+
 import skimage.transform
 import scipy.spatial
 from scipy.sparse import csr_matrix
@@ -16,7 +18,7 @@ from id11_utils import peakfiles
 
 
 def fix_ybins(ds):
-    """check that dty central scan is at position dty = 0. If not, update ymin, ymax and dty in dataset and recomputes ybins """
+    """ds : ImageD11.sinograms.dataset.Dataset class object. Red dty bins information in ds and check that dty central scan is at position dty = 0. If not, update ymin, ymax and dty in dataset and recomputes ybins """
     
     central_bin = len(ds.ybincens)//2
     c0 = ds.ybincens[central_bin]
@@ -37,8 +39,9 @@ def fix_ybins(ds):
 def sort_ypairs(ds, show=True):
     """
     search for symmetric dty scans ("ypairs") in a columnfile, and add them to dataset
-    cf : columnfile. must contain a dty column
-    ds : dataset h5 file
+    cf : ImageD11.columnfile. must contain a dty column
+    ds : ImageD11.sinograms.dataset.Dataset object
+    output: ypairs: list of tuples with dty cooridnates (-y,+y) of symmetric scans 
     """
     central_bin = len(ds.ybincens)//2
     hi_side = ds.ybincens[central_bin:].tolist()
@@ -57,7 +60,11 @@ def sort_ypairs(ds, show=True):
     
 
 def select_ypair(cf, ds, ypair):
-    """select peaks from two symmetric scans in a ypair and return them as two columnfiles"""
+    """select peaks from two symmetric scans (ds.ypairs) and return them as two columnfiles.
+    cf: columnfile with complete data (all dty scans)
+    ds: ImageD11.sinograms.dataset.Dataset object
+    ypair: tupple of values (-y,y) strored in ds.ypairs"""
+    
     y1, y2 = ypair[0], ypair[1]
     
     c1 =  cf.copy()
@@ -70,7 +77,7 @@ def select_ypair(cf, ds, ypair):
 
 
 def check_y_symmetry(cf, ds, saveplot=False):
-    """check that dty scan pairs contain about the same number of peaks + total peak intensity. For each pair, computes total intensity + total npeaks and plot them in function of abs(dty). If the dty and -dty plots do not fit, it is likely that the sample was not correctly aligned on the rotation center, or that dty is not centered on zero
+    """check that paired symmetrical scans contain about the same number of peaks + total peak intensity. For each pair, computes total intensity + total npeaks and plot them in function of |dty|. If the dty and -dty plots do not fit, it is likely that the sample was not correctly aligned on the rotation center, or that dty is not centered on zero
     """
     Nrows, Sum_I = [],[]
     
@@ -105,10 +112,14 @@ def check_y_symmetry(cf, ds, saveplot=False):
         
 
 
-def compute_csr_dist_mat(c1, c2, dist_cutoff, mult_fact_tth, mult_fact_I, verbose=True):
+def compute_csr_dist_mat(c1, c2, dist_cutoff, mult_fact_tth, mult_fact_I):
     """
-    computes KDTree for c1 and rotated c2 and returns a sparse distance matrix between the two trees, dropping all values
-    above dist_cutoff
+    Core function for friedel pair matching. 
+    c1, c2: paired ImageD11 columnfile 
+    dist_cutoff: distance threshold for csr_matrix. All values above are reset to zero
+    mult_fact_tth, mult_fact_I: parameters to rescale tth and I
+
+    This function uses the cKDTree algorithm from scipy.spatial to map distance between peaks from two symmetrical columnfiles c1,and c2 (columnfiles for positions (dty, -dty) in a scanning 3dxrd dataset). It returns a distance matrix between peaks from c1 and c2, where all values above a given distance threshold (dist_cutoff) are reset to zero. c2 is rotated in eta and omega to align friedel pairs. Peak distance is mapped in a 4d-space (eta, omega, f(two-theta (tth)), f(sum_Intensity)), so that neighbours are peaks close in tth, eta, omega angles and have similar intensity. tth and sum_I are rescaled to get a spread similar to eta and omega, in order to have a similar contribution of these four parameters in the total distance between peaks: f(tth) = a / [tan(tth) + b] and f(sum_I) = a*sum_I**1/3.  multiplication factor a is controlled with parameters mult_fact_tth and mult_fact_I.
     """
     
     # mask to select non-paired data
@@ -181,13 +192,14 @@ def label_friedel_pairs(c1, c2, dist_max, dist_step, mult_fact_tth = 1/2, mult_f
     """ Find Friedel pairs in symmetric columnfiles c1 and c2.
     Input:
     c1, c2: set of columnfiles corresonding to symmetric scans [dty, -dty]
-    dist_max: maximum distance between two peaks of a Friedel pair
-    dist_step: identification of Fridel pairs is done iteratively, starting with a low distance threshold, and increasing it a each iteration until dist = dist_max
+    dist_max: maximum distance between two peaks in a Friedel pair
+    dist_step: identification of Friedel pairs is done iteratively, starting with a low distance threshold, and increasing it a each iteration until dist = dist_max
     dist_step controls how much the threshold is increased at each iteration
     mult_fact_tth / mult_fact_I: scaling parameter to make sure tth and intensity weight approximately the same as eta and omega in the euclidian distance between peaks
     verbose : print information about pairing process
-    doplot : maked plots to assess pairing quality
-    output : c_merged : merged columnfile containing paired peaks in c1 and c2, with friedel pair labels (fp_id) and distance between paired peaks (fp_dist)
+    doplot : make plots to assess pairing quality
+    
+    Output : c_merged : merged columnfile containing paired peaks in c1 and c2, with friedel pair labels (fp_id) and distance between paired peaks (fp_dist)
     fp_labels : list of friedel pair labels identified """
     
     # INITIALIZATION
@@ -325,7 +337,7 @@ def process_ypair(args):
 
 def find_all_pairs(cf, ds, dist_max=1., dist_step=0.05, mult_fact_tth = 1, mult_fact_I = 1/20, doplot=True, verbose=True, saveplot=False):
     """
-    process successively all pairs of scans [-dty; +dty ] in a columnfile to find friedel pairs, and concatenate all the output into a new columnfile    with friedel pairs index (fp_id) and distance between paired peaks (fp_dist)
+    process successively all pairs of scans [-dty; +dty ] in a columnfile to find friedel pairs, and concatenate all the output into a new columnfile with friedel pairs index (fp_id) and distance between paired peaks (fp_dist)
     """
     # check if ds contains ypairs. if not, compute them
     if 'ypairs' not in dir(ds):
@@ -407,7 +419,7 @@ def find_all_pairs(cf, ds, dist_max=1., dist_step=0.05, mult_fact_tth = 1, mult_
 
 
 def recast(ary):
-    # given an array [x1, x2,...,xn] of len n, returns recast_array [x1, x1, x2, x2, ..., xn, xn] of len 2n
+    """ given an array [x1, x2,...,xn] of len n, returns recast_array [x1, x1, x2, x2, ..., xn, xn] of len 2n """
     return np.concatenate((ary,ary)).reshape((2,len(ary))).T.reshape((2*len(ary)))        
         
         
@@ -496,7 +508,7 @@ def update_fpairs_geometry(cf, detector = 'eiger', update_gvecs=True):
 
 
 def split_fpairs(cf):
-    """ split columnfile with friedel pairs into two twi columnfiles containing each one item of each pair"""
+    """ split columnfile with friedel pairs into two twin columnfiles containing each one item of each pair"""
     
     cf.sortby('fp_id') # sort by fp label
     
@@ -518,11 +530,15 @@ def split_fpairs(cf):
 
 
 def find_missing_twins(cf, selection, restrict_search=False, restrict_subset=[]):
-    """ starting from a peakfile cf and a subset of it (selected with peak index), this code:
-    1) find friedel pair ids (fpids) of peaks in the subset
-    2) Identify "singles", ie peaks missing their friedel twin with same fpid
-    3) Find the missing twins in the full columnfile or in a second subset (if restrict_search is true) and add them to the selection
-    Search can be restricted to a second subset of cf '"""
+    """ Identifies single peaks (unique fpids) in a subset of a paired columnfile and find their friedel twin in the full columnfile or in a second subset.
+    Inputs:
+    cf: columnfile with friedel pair identified (fp_id column). 
+    It has an even number of rows and exactly two peaks with same fp_id for all  values in fp_id
+    restrict_search: limit search for missing peaks to a subset of cf (faster if cf is large)
+    restrict_subset: subset to search in
+    
+    Output: new_selection: updated selection of peaks with missing peaks added
+ """
     
     fpids = cf.fp_id[selection]  # fpids in selection
     
