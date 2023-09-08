@@ -77,11 +77,8 @@ def pks_from_neighbour_pixels_fast(cf, xp, yp, xymax):
 # find_pixel_orientations(args=(to_index, xi, yi, etc.))    from 006_index_pixelmap
 #
 # methods: 
-# - copy
 # - update column  Need to secure operations to avoid overwriting a full column by mistake
-# list dataformat for each column: int16, int32, float
-# - convert to orix crystalmap
-# - plot data 
+
 
 # Pixelmap object
 ###########################################################################
