@@ -1,16 +1,14 @@
-import os, sys, h5py
+import os, sys, copy, h5py, tqdm
 import numpy as np, pylab as pl, math as m
 
 import fast_histogram
-import skimage.transform
-import scipy.spatial
-from scipy.stats import gaussian_kde
+from matplotlib_scalebar.scalebar import ScaleBar
 
-from ImageD11 import unitcell, columnfile, transform, sparseframe, cImageD11, refinegrains
-from ImageD11.grain import grain, write_grain_file, read_grain_file
+import ImageD11.columnfile, ImageD11.grain, ImageD11.refinegrains, ImageD11.sym_u, ImageD11.cImageD11
+import xfab
 
 from diffpy.structure import Atom, Lattice, Structure
-from orix import data, io, plot, crystal_map as ocm, quaternion as oq, vector as ovec
+from orix import data, io, plot as opl, crystal_map as ocm, quaternion as oq, vector as ovec
 
 from id11_utils import peakfiles, crystal_structure
 
@@ -90,49 +88,36 @@ def pks_from_neighbour_pixels_fast(cf, xp, yp, xymax):
 
 class Pixelmap:
     """ A class to store pixel information on a 2d grid """
-    def __init__(self, xbins, ybins, h5name=None):
-        # grid
-        self.grid = self.GRID(xbins, ybins)
-        self.xyi = np.asarray([i + 1000*j for i in xbins for j in ybins]).astype(np.int32)
-        self.xi = self.xyi % 1000
-        self.yi = self.xyi // 1000
-        # phase labeling  + crystal structure information
-        self.phases = self.PHASES()   # class storing crystal structure information on phases in pixelmap
-        self.phase_id = np.full(self.xyi.shape, -1, dtype=np.int8)   # map of phase_ids
     
+    # Init
+    ##########################
+    def __init__(self, xbins, ybins, h5name=None):
+        # grid + pixel index
+        self.grid = self.GRID(xbins, ybins)
+        self.xyi = np.asarray([i + 1000*j for j in ybins for i in xbins]).astype(np.int32)
+        self.xi = np.array(self.xyi % 1000, dtype=np.int16)
+        self.yi = np.array(self.xyi // 1000, dtype=np.int16)
+        
+        # phase / grain labeling  + crystal structure information
+        self.phases = self.PHASES() 
+        self.phase_id = np.full(self.xyi.shape, -1, dtype=np.int8)   # map of phase_ids
+        self.grain_id = np.full(self.xyi.shape, -1, dtype=np.int16)   # map of grain_ids
+        
+        # grains
+        self.grains = self.GRAINS_DICT()
+        
         self.h5name = h5name
     
     def __str__(self):
-        return f"Pixelmap: size:{self.grid.shape}, phases: {self.phases.pnames}, phase_ids: {self.phases.pids}"
+        return f"Pixelmap:\n size:{self.grid.shape},\n phases: {self.phases.pnames},\n phase_ids: {self.phases.pids},\n titles:{self.titles()}, \n grains:{len(self.grains.glist)}"
     
-    def add_data(self, data, dname):
-        """ add data column to pixelmap.
-        preferentially use numpy array or ndarray with first dimension = nx.ny, but lists may work as well"""
-        assert len(data) == self.grid.nx * self.grid.ny
-        setattr(self, dname, data)
-    
-    def copy(self):
-        """ returns a (deep) copy of the pixelmap """
-        pxnew = Pixelmap(self.grid.xbins, self.grid.ybins)
-        for pname, pid, path in zip(self.phases.pnames, self.phases.pids, self.phases.cif_paths):
-            if pname == "notIndexed":
-                continue
-            cs = crystal_structure.CS(pname,pid,path)
-            pxnew.phases.add_phase(pname, cs)
-            
-        skip = ['grid', 'xyi', 'xi', 'yi', 'h5name', 'phases']
-        for k,v in self.__dict__.items():
-            if k in skip:
-                continue
-            pxnew.add_data(v, k)
-        return pxnew
-    
- #   def update_pixels(xyi_indx, dname):
- #       """ update data column dname for a subset of pixel selected by xyi indices"""
- #       pxindx = 
+    def get(self,attr):
+        # alias for __getattribute__
+        return self.__getattribute__(attr)
     
     
-    
+    # subclasses
+    ##########################  
     class GRID:
         # grid properties
         def __init__(self, xbins, ybins):
@@ -144,11 +129,22 @@ class Pixelmap:
             self.pixel_size = 1
             self.pixel_unit = 'um'
             
+            
         def __str__(self):
             return f"grid: size:{self.shape}, pixel size: {str(self.pixel_size)+' '+self.pixel_unit}"
-            
-            
-            
+   
+        def scalebar(self):
+        # scalebar for plotting maps
+            scalebar =  ScaleBar(dx = self.pixel_size,
+                                     units = self.pixel_unit,
+                                     length_fraction=0.2,
+                                     location = 'lower left',
+                                     box_color = 'w',
+                                     box_alpha = 0.5,
+                                     color = 'k',
+                                     scale_loc='top')
+            return scalebar
+    
     class PHASES:
         # crystal structures
         def __init__(self):
@@ -159,6 +155,9 @@ class Pixelmap:
             
         def __str__(self):
             return f"phases: {self.pnames}"
+        
+        def get(self,attr):
+            return self.__getattribute__(attr)
             
         def add_phase(self, pname, cs):
             """ add phase to pixelmap.phases. pname = phase name, cs = crystal_structure.CS object """
@@ -176,9 +175,9 @@ class Pixelmap:
             self.sort_phase_lists()
             
         def delete_phase(self, pname):
-            cs = self.__getattribute__(pname)
-            pid = cs.__getattribute__('phase_id')
-            path = cs.__getattribute__('cif_path')
+            cs = self.get(pname)
+            pid = cs.get('phase_id')
+            path = cs.get('cif_path')
             self.pnames = [p for p in self.pnames if p != pname]
             self.pids = [i for i in self.pids if i != pid]
             self.cif_paths = [p for p in self.cif_paths if p != path]
@@ -193,9 +192,598 @@ class Pixelmap:
             sorted_paths = [l3 for (l1, l2, l3) in sorted(zip(self.pids, self.pnames, self.cif_paths), key=lambda x: x[0])]
             self.pids = sorted_pids
             self.pnames = sorted_pnames
-            self.cif_paths = sorted_paths
+            self.cif_paths = sorted_paths   
+            
+            
+    class GRAINS_DICT:
+        # dict of ImageD11 grains
+        def __init__(self):
+            self.dict = {}
+            self.gids = list(self.dict.keys())
+            self.glist = list(self.dict.values())
+            
+        def __str__(self):
+            return f"nb grains: {len(self.glist)}"
+        
+        
+        def get(self,prop, grain_id):
+            """ return a property prop for a grain selected by grain id"""
+            g = self.dict[grain_id]
+            return g.__getattribute__(prop)
+        
+            
+        def get_all(self, prop):
+            """ return a grain property for all grains in grains_dict as an array """
+            return np.array( [g.__getattribute__(prop) for g in self.glist] )
+        
+        def add_prop(self, prop, grain_id, val):
+            """ add new property to a grain in grains. prop: name for new property to add; val : value of new property"""
+            g = self.dict[grain_id]
+            setattr(g, prop, val)
+        
+        
+        def compute_strain(self, unit_cell_ref):
+            """ compute strain relative to a reference cell for all grains is grain_dict"""
+            for g in tqdm.tqdm(self.glist):
+                g.e11, g.e12, g.e13, g.e22, g.e23, g.e33 = g.eps_sample(unit_cell_ref)  # strain components voigt
+                
+                # strain invariants
+                g.I1 = g.e11+g.e22+g.e33
+                #  J2 = 1∕2.trace(e**2) - 1/6.trace(e)**2 = 1/2.trace(s**2) where s is the deviatoric strain tensor
+                J2 = 1/2*(g.e11**2 + g.e22**2 + g.e33**2) - 1/6*g.I1**2
+                g.J2 = np.max(J2,0) # J2 is positive, so negative values are likely dubious
+        
+        
+        def compute_stress(self, COMP_MAT):
+            """ compute elastic stress tensor for all grains in self.grains. strain must have been computed before
+            COMP_MAT: compliance matrix to relate strain to stress"""
+            for g in tqdm.tqdm(self.glist):
+                eps = np.array([g.e11,g.e22,g.e33,g.e23,g.e13,g.e12])
+                s = np.matmul(COMP_MAT , np.array([1,1,1,2,2,2])*eps ) 
+                g.s11, g.s22, g.s33, g.s23, g.s13, g.s12 = s[0],s[1],s[2],s[3],s[4],s[5]
+                # stress invariants
+                g.sI1 = g.s11+g.s22+g.s33
+                sJ2 = 1/2*(g.s11**2 + g.s22**2 + g.s33**2) - 1/6*g.sI1**2
+                g.sJ2 = np.max(sJ2,0) # J2 is positive
+                
+                
+        def plot_grains_prop(self, prop, s_fact=10, trim=[5,95], out=False, **kwargs):
+            """ scatter plot of grains colored by property prop, where (x,y) is grain centroid position and s is grainsize. 
+            To plot all strain /stress components at once, type prop='stress' or prop='strain' 
+            s_fact: factor to adjust spot size on the scatter plot
+            trim: upper/ lower percentile values of prop to adjust colorbar limits """
+            
+            try:
+                cen = self.get_all('centroid')
+                gs = self.get_all('grainSize')
+            except:
+                print('missing grainSize or centroid position')
+                return
+            
+            if prop not in 'strain,stress'.split(','): 
+                assert np.all( [hasattr(g, prop) for g in self.glist] )
+                colorsc = self.get_all(prop) # color scale defined by selected property
+        
+                fig = pl.figure(figsize=(6,6))
+                ax = fig.add_subplot(111, aspect='equal')
+                sc = ax.scatter(cen[:,0], cen[:,1], s = gs/10, c = colorsc, **kwargs)
+                ax.set_title(prop)
+                cbar = pl.colorbar(sc, ax=ax, orientation='vertical', pad = 0.05, shrink=0.75)
+                cbar.formatter.set_powerlimits((0, 0)) 
+            
+            else:
+                if prop == 'strain':
+                    titles = 'e11,e12,e13,e22,e23,e33'.split(',')
+                else:
+                    titles = 's11,s12,s13,s22,s23,s33'.split(',')
+                
+                fig, ax = pl.subplots(2,3, figsize=(10,6), sharex=True, sharey=True)
+                ax = ax.flatten()
+                
+                for i, (a,t) in enumerate(zip(ax, titles)):
+                    a.set_aspect('equal')
+                    x = self.get_all(t)
+                    low, up = np.percentile(x, (trim[0],trim[1]))
+    
+                    # plots
+                    norm=pl.matplotlib.colors.CenteredNorm(vcenter=np.median(x), halfrange=up)
+                    sc = a.scatter(cen[:,0], cen[:,1], s = gs/10, c = x, norm=norm, **kwargs)
+                    a.set_title(t)
+            
+                    # colorbar
+                    cbar = pl.colorbar(sc, ax=a, orientation='vertical', pad=0.04, shrink=0.7)
+                    cbar.formatter.set_powerlimits((0, 0)) 
+            
+            # Adjust layout
+            fig.tight_layout()
+            fig.suptitle('grain scatterplot - '+prop, y=1.0)
+                    
+            if out:
+                return fig
+            
+            
+            
+        def hist_grains_prop(self, prop, trim=[5,95], out=False, **kwargs):
+            """ histgram of grains property prop. 
+            To plot all strain /stress components at once, type prop='stress' or prop='strain' 
+            trim: upper/ lower percentile values of prop to adjust histogram limits """
+            
+            
+            if prop not in 'strain,stress'.split(','): 
+                assert np.all( [hasattr(g, prop) for g in self.glist] )
+                x = self.get_all(prop) 
+                low, up = np.percentile(x, (trim[0],trim[1]))
+        
+                fig = pl.figure(figsize=(6,6))
+                ax = fig.add_subplot(111)
+                h = ax.hist(x, **kwargs)
+                ax.vlines(np.median(x), ymin=0, ymax=h[0].max(), colors='r', label='median')
+                ax.set_xlim(low, up)
+                ax.set_title(prop)
+            
+            else:
+                
+                if prop == 'strain':
+                    titles = 'e11,e12,e13,e22,e23,e33'.split(',')
+                else:
+                    titles = 's11,s12,s13,s22,s23,s33'.split(',')
+                
+                fig, ax = pl.subplots(2,3, figsize=(10,6))
+                ax = ax.flatten()
+                for i, (a,t) in enumerate(zip(ax, titles)):
+                    x = self.get_all(t)
+                    low, up = np.percentile(x, (trim[0],trim[1]))
+                    h = a.hist(x, **kwargs)
+                    a.vlines(np.median(x), ymin=0, ymax=h[0].max(), colors='r', label='median')
+                    a.set_title(t)
+            
+            # Adjust layout
+            fig.tight_layout()
+            fig.suptitle('distribution - '+prop, y=1.0)
+            
+            if out:
+                return fig
+
+                
+
+    # methods
+    ######################
+    def add_data(self, data, dname):
+        """ add data column to pixelmap.
+        preferentially use numpy array or ndarray with first dimension = nx.ny, but lists may work as well"""
+        assert len(data) == self.grid.nx * self.grid.ny
+        setattr(self, dname, data)
+        
+    def rename_data(self, oldname, newname):
+        """ rename data column """
+        data = self.__getattribute__(oldname)
+        setattr(self, newname, data)
+        delattr(self, oldname)
+        
+    def titles(self):
+        return [t for t in self.__dict__.keys() if t not in ['grid', 'phases', 'grains', 'h5name'] ]
+        
+    
+    def copy(self):
+        """ returns a (deep) copy of the pixelmap """
+        pxmap_new = copy.deepcopy(self)
+        return pxmap_new
+    
+    
+    def update_pixels(self, xyi_indx, dname, newvals):
+        """ update data column dname with new values for a subset of pixel selected by xyi indices, without touching other pixels
+        xyi_indx: list of xyi index of pixels to update
+        dname: data column to update
+        newvals: new values"""
+        
+        assert dname in self.__dict__.keys()
+        
+        xyi_indx = np.array(xyi_indx)
+        
+        # select data column and pixels to update
+        dat = self.get(dname)
+        dtype = type(dat.flatten()[0])
+        pxindx = np.searchsorted(self.xyi, xyi_indx)
+        
+        # update data
+        assert newvals.shape[1:] == dat.shape[1:]  # check array shape compatibility
+        if len(dat.shape) == 1:  # dat is simple 1d array
+            dat[pxindx] = newvals.astype(dtype)
+        else:    # nd array of arbitrary size
+            dat[pxindx,:] = newvals.astype(dtype)
+            
+        setattr(self, dname, dat)
+        
+        
+    def update_grains_pxindx(self, mask=None, update_map=False):
+        """ update grains pixel indexing (pxindx / xyi_indx), according to criteria defined in mask.
+        Allows to remove bad pixels (large misorientation, low npks indexed, high drlv2, etc.) from grain masks
+        mask: bool array of same shape as data columns (nx*ny,) to filter bad pixels
+        update_map: if True, grain_id in pixelmap will also be updated. MAKE A COPY OF PIXELMAP FIRST,
+        OR INITIAL GRAIN INDEXING WILL BE LOST"""
+        
+        if mask is None:
+            mask = np.full(self.xyi.shape, True)
+    
+        assert mask.shape == self.xyi.shape # make sure mask is the good size
+    
+        for gi,g in tqdm.tqdm(zip(self.grains.gids, self.grains.glist)):
+            gm = np.all([mask, self.grain_id==gi], axis=0)  # select pixels for each grain
+            g.pxindx = np.argwhere(gm)[:,0].astype(np.int32)  # reassign pxindx
+            g.xyi_indx = self.xyi[g.pxindx].astype(np.int32)    # pixel labeling using XYi indices. needed to select peaks from cf
+        # update grain ids
+        if update_map:
+            self.grain_id[~mask] = -1
+        
+        
+    def filter_by_phase(self, pname):
+        """ makes a deep copy of pixelmap and reset all pixels not corresponding to selected phase to zero. 
+        also update h5name in new pixelmap to avoid overwriting former file"""
+        
+        # make a copy of pixelmap
+        xmap_p = self.copy()
+        xmap_p.h5name = self.h5name.replace('.h5','_'+pname+'.h5')
+        # select phase
+        phase = xmap_p.phases.get(pname)
+        pid = phase.phase_id
+        
+        # update columns
+        for dname in self.__dict__.keys():
+            if dname in ['grid', 'xyi', 'xi', 'yi', 'phases', 'h5name', 'grains']:
+                continue
+            
+            msk = self.phase_id == pid
+            array = self.get(dname)
+            
+            if 'strain' in dname or 'stress' in dname:
+                new_array = np.full(array.shape, float('inf'))
+            elif dname == 'phase_id' or dname == 'grain_id':
+                new_array = np.full(array.shape, -1, dtype=int)
+            else:
+                new_array = np.zeros_like(array)
+                
+            new_array[msk] = array[msk]
+            xmap_p.add_data(new_array, dname)
+        
+        # update phases
+        for p in xmap_p.phases.pnames:
+            if p == 'notIndexed' or p == pname:
+                continue
+            xmap_p.phases.delete_phase(p)
+        
+        return xmap_p
+    
+    
+    def add_grains_from_map(self, pname):
+        """ create grains dict directly from pixelmap. requires data columns for grain ids ('grain_id') and pixel UBI
+        ('UBI') in pixelmap. It uses a mask to select pixels by grain id, compute median UBI over each grain, create 
+        ImageD11.grains from it and add them to pixelmap.grains
+        For now, only works for a single phase: filter pixelmap before, to keep only one phase in the map"""
+        
+        assert 'UBI' in self.__dict__.keys()
+        gid_u = np.unique(self.grain_id).astype(np.int16)  # list of unique grain ids
+              
+        # crystal structure
+        cs = self.phases.get(pname)
+        pid = cs.phase_id
+        sym = cs.orix_phase.point_group.laue
+        # phase + UBI masks. pm: also select notindexed pixels, because some are included to grain masks by smoothing (mtex)
+        pm = np.any([self.phase_id == pid, self.phase_id == -1], axis=0)  
+        isUBI = np.asarray( [np.trace(ubi) != 0 for ubi in self.UBI] )   # mask: True if UBI at a given pixel position is not null
+  
+        # initialize grain
+        self.grains.__init__()
+        
+        # loop through unique grain ids, select pixels, compute mean ubi and create grain
+        ########################################
+        for i in tqdm.tqdm(gid_u):
+            # skip notindexed domains
+            if i<=0:
+                continue  
+            # compute median grain properties and create grain.
+            gm = self.grain_id==i
+            try:   
+                ubi_g = np.nanmedian(self.UBI[pm*gm*isUBI], axis=0)
+                g = ImageD11.grain.grain(ubi_g)  
+            except:
+                continue
+        
+            # grain to xmap indexing
+            g.gid = i
+            g.pxindx = np.argwhere(gm*isUBI)[:,0].astype(np.int32)  # pixel indices in grainmap matching with this grain
+            g.grainSize = len(g.pxindx)
+            g.surf = g.grainSize * self.grid.pixel_size**2  # grain surface in pixel_unit square
+            g.xyi_indx = self.xyi[g.pxindx]    # pixel labeling using XYi indices. needed to select peaks from cf
+        
+            # phase properties + misorientation
+            try:
+                og = oq.Orientation.from_matrix(g.U, symmetry = sym)
+                opx = oq.Orientation.from_matrix(self.U[gm*isUBI], symmetry=sym)
+                misOrientation = og.angle_with(opx, degrees=True)
+                g.GOS = np.median(misOrientation)  # grain orientation spread defined as median misorientation over the grain
+            except:
+                f
+                
+            # add grain to grains dict
+            self.grains.glist.append(g)
+            self.grains.gids.append(g.gid)
+        
+        # update grains dict
+        self.grains.dict = dict(zip(self.grains.gids, self.grains.glist))
+     
+    
+    def map_grain_prop(self, prop, pname):
+        """ map a grain property (U, UBI, unitcell, grainsize, etc.) taken from grains in grains.dict. to the 2D grid.
+        For a grain property p, his function creates a new data column 'p_g' in pixelmap to map this property for each grain on
+        the 2D grid. For now, it only works for a single phase (pname): filter pixelmap before, to keep only one phase in the map
+        
+        To quickly map all six strain / stress components, simply type 'stress" or 'strain' as a prop and the function will
+        look for all tensor components and return a single output as a ndarray.
+        
+        If grain orientation (U matrix) is selected and pixel orientations are available in pixelmap, 
+        it will also compute misorientation (angle between grain and pixel orientation in degree)
+        """
+        
+        # Initialize new array
+        #####################################
+        array_shape = [ self.grid.nx * self.grid.ny ]  # size of pixelmap
+        compute_misO = False  # flag to compute misOrientation
+        
+        if any([s in prop for s in ['stress','strain']]):   # special case for stress / strain
+            prop_name = prop+'_g'
+            array_shape.append(6)
+            newarray = np.full(array_shape, float('inf'))  # default value = inf to avoid confonding zero strain / stress with no data
+        else:
+            prop_shape = list( self.grains.get_all(prop).shape[1:] )
+            prop_name = str(prop)+'_g'  # add g suffix to make it clear it is derived from a grain property
+            array_shape.extend(prop_shape)
+        
+            # special values to initialize grain/phase id: -1. Default: 0
+            if any([s in prop for s in 'gid,grain_id,phase_id'.split(',')]):
+                init_val = -1
+            elif any([s in prop for s in 'I1,J2'.split(',')]):
+                init_val = float('inf')
+            else:
+                init_val = 0
+            
+            # dtype: float (default) or int 
+            if 'int' in str( type(self.grains.get_all(prop)[0]) ):
+                dtype = 'int'
+            else:
+                dtype = 'float'
+            newarray = np.full(array_shape, init_val, dtype = dtype)
+        
+        #if grain orientation U is selected, try to compute misorientation as well
+        if prop == 'U':
+            try:
+                U_px = self.get('U')
+                misO = np.full(self.xyi.shape, 180, dtype=float)   # default misorientation to 180°
+                # crystal structure
+                cs = self.phases.get(pname)
+                sym = cs.orix_phase.point_group.laue
+                compute_misO = True
+            except:
+                print('No orientation data in pixelmap, or name not recognized (must be U). Will not compute misorientation.')
+                
+        # update with values from grains in graindict
+        #####################################
+        gid_map = self.get('grain_id')
+        
+        for gi,g in tqdm.tqdm(zip(self.grains.gids, self.grains.glist)):
+            gm = np.argwhere(gid_map == gi).T[0]  # grain mask
+            
+            # fill newarray. Different cases depending of prop shape  + strain / stress cases
+            if prop == 'strain':
+                eps = np.array([g.e11, g.e12, g.e13, g.e22, g.e23, g.e33])
+                newarray[gm,:] = eps
+            elif prop == 'stress':
+                sigma = np.array([g.s11, g.s12, g.s13, g.s22, g.s23, g.s33])
+                newarray[gm,:] = sigma
+            elif len(prop_shape) == 0:
+                newarray[gm] = self.grains.get(prop,gi)
+            else:
+                newarray[gm,:] = self.grains.get(prop,gi)
+                
+            # misorientation
+            if prop=='U' and compute_misO:
+                og = oq.Orientation.from_matrix(newarray[gm], symmetry=sym)
+                opx =  oq.Orientation.from_matrix(self.get('U')[gm], symmetry=sym)
+                misO[gm] = og.angle_with(opx, degrees=True)
+        
+        # add newarray to pixelmap
+        self.add_data(newarray, prop_name)
+        if compute_misO:
+            self.add_data(misO, 'misOrientation')
+
+                                                 
+
+# TO DO: alterative method to define grains: load grain list with grain ids and grain masks and fill pixelmap using grain masks
+#    def add_grains_from_glist(self, glist):
+
+
+        
+    def plot(self, dname, save=False, hide_cbar=False, out=False, **kwargs):
+        """ plot data from column dname. data in self.dname must be a single array"""
+        nx, ny = self.grid.nx, self.grid.ny
+        xb, yb = self.grid.xbins, self.grid.ybins
+        dat = self.get(dname).reshape(nx, ny)
+        
+        fig = pl.figure(figsize=(6,6))
+        ax = fig.add_subplot(111, aspect ='equal')
+        ax.set_axis_off()
+        im = ax.pcolormesh(xb, yb, dat, **kwargs)
+        ax.set_title(dname)
+        ax.add_artist(self.grid.scalebar())
+        
+        if not hide_cbar:
+            fig.suptitle(self.h5name.split('/')[-1].split('.h')[0], y=.9)
+            if 'phase_id' in dname:
+                cbar = pl.colorbar(im, ax=ax, orientation='vertical', pad=0.08, shrink=0.7, ticks = self.phases.pids)
+                cbar.ax.set_yticklabels(self.phases.pnames)
+            else:
+                cbar = pl.colorbar(im, ax=ax, orientation='vertical', pad=0.08, shrink=0.7, label=dname)
+                cbar.formatter.set_powerlimits((0, 0)) 
+        
+        if save:
+            fname = self.h5name.replace('.h5', '_'+dname+'.png')
+            fig.savefig(fname, format='png') 
+        if out:
+            return fig
+            
+            
+            
+    def plot_voigt_tensor(self, dname, trim = [2,98], save=False, show_axis=True, out=False, **kwargs):
+        """ plot all components of strain / stress tensor (voigt notation)
+        dname: column name to plot. data must be a Nx8 array with strain / stress components in the following order:
+        e11, e12, e13, e22, e23, e33, I1, J2
+        trim : trim strain / stress distribution for each components to selected percentile values to exclude outliers""" 
+        
+        nx, ny = self.grid.nx, self.grid.ny 
+        xb, yb = self.grid.xbins, self.grid.ybins
+        voigt_tensor = self.get(dname)
+        
+        # figures layout
+        fig, ax = pl.subplots(2,3, figsize=(10,6), sharex=True, sharey=True)
+        ax = ax.flatten()
+        
+        if 'strain' in dname:
+            titles = 'e11,e12,e13,e22,e23,e33'.split(',')
+        else:
+            titles = 's11,s12,s13,s22,s23,s33'.split(',')
+        
+        # loop through strain / stress components and plot them in map + histogram
+        for i, (a,t) in enumerate(zip(ax, titles)):
+            a.set_aspect('equal')
+            a.set_axis_off()
+            x = voigt_tensor[:,i].reshape(nx,ny)
+            x_u = np.unique(voigt_tensor[voigt_tensor != float('inf')])  # select unique values to get distribution across grains  
+            low, up = np.percentile(x_u, (trim[0],trim[1]))
+    
+            # plots
+            norm=pl.matplotlib.colors.CenteredNorm(vcenter=np.median(x_u), halfrange=up)
+            im = a.pcolormesh(xb, yb, x, norm=norm, **kwargs)
+            a.set_title(t)
+            
+            # colorbar
+            cbar = pl.colorbar(im, ax=a, orientation='vertical', pad=0.04, shrink=0.7)
+            cbar.formatter.set_powerlimits((0, 0)) 
+            
+        # Adjust layout
+        fig.tight_layout()
+        dsname = self.h5name.split('/')[-1].split('.h')[0]
+        fig.suptitle('grainmap '+dname+' - '+dsname, y=1.0)
+
+        if save:
+            fname = self.h5name.replace('.h5', '_'+dname+'.png')
+            fig.savefig(fname, format='png', dpi=150)
+            
+        if out:
+            return fig
+            
+        
+        
+    def hist_voigt_tensor(self, dname, trim=[2,98], nbins=100, save=False, out=False, **kwargs):
+        """ histogram of all six strain / stress voigt tensor components """
+        voigt_tensor = self.get(dname)
+        # figures layout
+        fig, ax = pl.subplots(2,3, figsize=(10,6))
+        ax = ax.flatten()
+        
+        if 'strain' in dname:
+            titles = 'e11,e12,e13,e22,e23,e33'.split(',')
+            lab = dname.replace('strain', 'eps')
+        else:
+            titles = 's11,s12,s13,s22,s23,s33'.split(',')
+            lab = dname.replace('stress', 'sigma')
+          
+        for i, (a,t) in enumerate(zip(ax, titles)):
+            x = voigt_tensor[:,i]
+            x_c = x[x != float('inf')]
+            low, up = np.percentile(x_c, (trim[0],trim[1]))
+            bins = np.linspace(low, up, nbins)
+            h = a.hist(x_c, label=lab, bins=bins, **kwargs)
+            a.vlines(x=np.median(x_c), ymin=0, ymax=h[0].max(), colors='navy', label='median')
+            a.set_title(t)
+            a.set_xlim(np.percentile(x_c, (1,99)))
+            a.ticklabel_format(style='sci', axis='x', scilimits=(0,0))
+                
+        fig.tight_layout()
+        dsname = self.h5name.split('/')[-1].split('.h')[0]
+        fig.suptitle('hist '+dname+' - '+dsname, y=1.0)
+            
+        if save:
+            fname = self.h5name.replace('.h5', '_'+dname+'_hist.png')
+            fig.savefig(fname, format='png', dpi=150)
+        if out:
+            return fig
             
     
+    
+    def plot_ipf_map(self, dname, phase, ipfdir = [0,0,1], save=False, out=False, **kwargs):
+        """ plot orientation color map (using orix)
+        dname: data column, must be a Nx3x3 ndarray of orientation matrices
+        phase : name of the phase to plot. must be in self.phases
+        ipfdir: direction for the ipf colorkey. must be a 3x1 vctor [x,y,z]. Default: z-vector
+        out: return orix crystalmap"""
+        
+        # select phase properties
+        assert phase in self.phases.pnames
+        cs = self.phases.get(phase)
+        cs.str_diffpy.title = cs.name
+        sym = cs.orix_phase.point_group.laue
+        ipf_key = opl.IPFColorKeyTSL(sym, direction=ovec.Vector3d(ipfdir))
+        
+        #convert matrix orientation to quaternions
+        U = self.get(dname)
+        ori = oq.Orientation.from_matrix(U, symmetry=sym)
+        
+        # select phase id
+        phase_id = np.where(self.phase_id==cs.phase_id, cs.phase_id,-1)
+        
+        # orix crystal map
+        orix_map = ocm.CrystalMap(rotations = ori,
+                      phase_id = phase_id,
+                      x = self.xi,
+                      y = self.yi,
+                      phase_list = ocm.PhaseList(space_groups=[cs.spg_no],
+                                                 structures=[cs.str_diffpy]),
+                      scan_unit = self.grid.pixel_unit)
+        
+        # select orientations to plot
+        o = orix_map[phase].orientations
+        rgb = ipf_key.orientation2color(o)
+        
+        # plot ipf map
+        pl.matplotlib.rcParams.update({'font.size': 10})
+        fig = pl.figure(figsize=(8,8))
+
+        ax0=fig.add_subplot(111, aspect='equal', projection='plot_map')
+        ax0.set_axis_off()
+        
+        ax0.plot_map(orix_map[phase], rgb, scalebar=False, **kwargs)
+        ax0.title.set_text(phase+' - ipf map '+str(ipfdir))
+
+        # plot color key
+        pl.matplotlib.rcParams.update({'font.size': 4})
+        fig.subplots_adjust(right=0.75)
+        ax1 = fig.add_axes([0.8, 0.25, 0.15, 0.15], projection='ipf',  symmetry=sym)
+        ax1.plot_ipf_color_key(show_title=False)
+
+        dsname = self.h5name.split('/')[-1].split('.h')[0]
+        
+        if save:
+            fname = self.h5name.replace('.h5', '_ipf_'+str(ipfdir)+'.png')
+            fig.savefig(fname, format='png', dpi=150)
+
+        pl.matplotlib.rcParams.update({'font.size': 10})
+        fig.suptitle(dsname, y=0.9)
+        
+        if out:
+            return fig
+        
+
+            
+    # TO DO : Make it compress better. Can use less space-consuming dtypes or some arrays.  Need also to update save grains function
     def save_to_hdf5(self, h5name=None, debug=0):
         """ save pixelmap to hdf5 format"""
         # save path
@@ -227,12 +815,16 @@ class Pixelmap:
                 phase = phases_group.create_group(pname)
                 phase.attrs['pid'] = pid
                 phase.attrs['cif_path'] = path
+                
+            # save grains
+            save_grains_dict(self.grains.dict, h5name)
+
             
             # Save other data
-            skip = ['grid', 'xi', 'yi', 'phases', 'pksind', 'h5name']
+            skip = ['grid', 'xi', 'yi', 'phases', 'pksind', 'h5name', 'grains']
             
             for item in self.__dict__.keys():
-                if item in skip:
+                if item in skip or '_g' in item:  # do not save map columns in skip list or map columns exported from grains dict
                     continue
                 data = self.__getattribute__(item)
                 if debug:
@@ -240,9 +832,14 @@ class Pixelmap:
                 f.create_dataset(item, data = data, dtype = type(data.flatten()[0]))
 
         print("Pixelmap saved to:", h5name)
-
         
+
+
+##########################    
+        
+    
 def load_from_hdf5(h5name):
+    """ load pixelmap for hdf5 file"""
     with h5py.File(h5name, 'r') as f:
         # Load grid information
         xbins  = f['grid/xbins'][()]
@@ -258,9 +855,16 @@ def load_from_hdf5(h5name):
             pnames.append(pname)
             pids.append(pid)
             paths.append(cif_path)
+            
+        # Load grains
+        if 'grains' in list(f.keys()):
+            grainsdict = load_grains_dict(h5name)
+        else:
+            grainsdict = {}
+    
         
         # Load other data
-        skip = ['grid', 'phases']
+        skip = ['grid', 'phases', 'grains']
         data = {}
         for item in f.keys():
             if item in skip:
@@ -269,7 +873,9 @@ def load_from_hdf5(h5name):
     
     # Create a new Pixelmap object 
     pixelmap = Pixelmap(xbins, ybins, h5name=h5name)
-    
+    # update grid
+    pixelmap.grid.pixel_size = pxsize
+    pixelmap.grid.pixel_unit = pxunit
     # Add phases to Pixelmap
     for pname, pid, path in zip(pnames, pids, paths):
         if pname == "notIndexed":
@@ -279,9 +885,85 @@ def load_from_hdf5(h5name):
     # Add data
     for d in data.keys():
         pixelmap.add_data(data[d], d)
+    # Add grainsdict
+    pixelmap.grains.dict = grainsdict
+    pixelmap.grains.gids = list(grainsdict.keys())
+    pixelmap.grains.glist = list(grainsdict.values())
         
     return pixelmap
 
 
+
+
+def save_grains_dict(grainsdict, h5name, debug=0):
+    """ save grain dictionnary to hdf5. Append data to existing h5 file"""
+    
+    with h5py.File( h5name, 'a') as hout:
+        # Delete the existing 'grains' group if it already exists
+        if 'grains' in hout:
+            del hout['grains']
             
+        grains_grp = hout.create_group('grains')
+
+        for i,g in grainsdict.items():
+            gr = grains_grp.create_group(str(i))    
+            gprops = [p for p in list(g.__dict__.keys()) if not p.startswith('_')]  # list grain properties, skip _U, _UB etc. (dependent)
+
+            for p in gprops:
+                attr = g.__getattribute__(p)
+                if attr is None:   # skip empty attributes
+                    continue
+                
+                # find data type + shape
+                if np.issubdtype(type(attr), np.integer):
+                    dtype = 'int'
+                    shape = None
+                elif np.issubdtype(type(attr), np.floating):
+                    dtype = 'float'
+                    shape = None
+                else:
+                    attr = np.array(attr)
+                    shape = attr.shape
+                    try:
+                        dtype = type(attr.flatten()[0])
+                    except:    # occurs if attr is empty
+                        dtype = float
+                    
+                # save arrays as datasets
+                if shape is not None: 
+                    gr.create_dataset(p, data = attr, dtype = dtype) 
+                else:
+                    gr.attrs.update({ p : attr})
+
+
+def load_grains_dict(h5name):
+    grainsdict = {}
+    with h5py.File(h5name,'r') as f:
+        if 'grains' in list(f.keys()):
+            grains = f['grains']
+        else:
+            grains = f
+            
+        gids = list(grains.keys())
+        gids.sort(key = lambda i: int(i))
+        
+        # loop through grain ids and load data
+        for gi in gids:
+            gr = grains[gi]
+            # create grain from ubi
+            g = ImageD11.grain.grain(gr['ubi'])
+            # load other properties
+            for prop, vals in gr.items():
+                if prop == 'ubi':
+                    continue
+                ary = vals[()]
+                setattr(g, prop, ary)
+            # add grain attributes
+            for attr, val_attr in gr.attrs.items():
+                setattr(g, attr, val_attr)
+                        
+            # add grain to grainsdict
+            grainsdict[int(gi)] = g
+            
+    return grainsdict
         
