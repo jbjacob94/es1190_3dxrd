@@ -32,6 +32,9 @@ class CS:
         
     def __str__(self):
         return f"CS: {self.name}, phase_id: {self.phase_id}, spg:{self.spg}, spg_no:{self.spg_no}, lattice:{self.cell}"
+    
+    def get(self,prop):
+        return self.__getattribute__(prop)
         
         
     def add_data_from_cif(self):
@@ -116,12 +119,12 @@ class CS:
         if doplot:
             pl.figure()
             pl.plot(tth, I,'-')
-            pl.vlines(x=pks_sorted, ymin=0, ymax=max(pksI_sorted), colors='red', lw=.5)
+            pl.vlines(x=pks_sorted, ymin=0, ymax=1, colors='red', lw=.5)
             pl.xlabel('tth deg')
             pl.ylabel('normalized Intensity')
             pl.title('strongest diffraction peaks - ' + self.name)
             
-  
+            
 def load_CS_from_cif(cif_path, name='', pid = -1):
     """ create a CS object directly from cif file"""
     cs = CS(name, pid, cif_path)
