@@ -77,8 +77,11 @@ def pks_from_neighbour_pixels_fast(cf, xp, yp, xymax):
 # find_pixel_orientations(args=(to_index, xi, yi, etc.))    from 006_index_pixelmap
 #
 # methods: 
+# - copy
 # - update column  Need to secure operations to avoid overwriting a full column by mistake
-
+# list dataformat for each column: int16, int32, float
+# - convert to orix crystalmap
+# - plot data 
 
 # Pixelmap object
 ###########################################################################
@@ -211,7 +214,7 @@ class Pixelmap:
             
         def get_all(self, prop):
             """ return a grain property for all grains in grains_dict as an array """
-            return np.array( [g.__getattribute__(prop) for g in self.glist] )
+            return np.array( [g.__getattribute__(prop) for g in list(self.dict.values())] )
         
         def add_prop(self, prop, grain_id, val):
             """ add new property to a grain in grains. prop: name for new property to add; val : value of new property"""
@@ -381,6 +384,7 @@ class Pixelmap:
         dat = self.get(dname)
         dtype = type(dat.flatten()[0])
         pxindx = np.searchsorted(self.xyi, xyi_indx)
+        
         
         # update data
         assert newvals.shape[1:] == dat.shape[1:]  # check array shape compatibility
@@ -619,7 +623,7 @@ class Pixelmap:
                 cbar.ax.set_yticklabels(self.phases.pnames)
             else:
                 cbar = pl.colorbar(im, ax=ax, orientation='vertical', pad=0.08, shrink=0.7, label=dname)
-                cbar.formatter.set_powerlimits((0, 0)) 
+                cbar.formatter.set_powerlimits((-1, 1)) 
         
         if save:
             fname = self.h5name.replace('.h5', '_'+dname+'.png')
@@ -660,6 +664,7 @@ class Pixelmap:
             norm=pl.matplotlib.colors.CenteredNorm(vcenter=np.median(x_u), halfrange=up)
             im = a.pcolormesh(xb, yb, x, norm=norm, **kwargs)
             a.set_title(t)
+            a.add_artist(self.grid.scalebar())
             
             # colorbar
             cbar = pl.colorbar(im, ax=a, orientation='vertical', pad=0.04, shrink=0.7)
@@ -713,15 +718,15 @@ class Pixelmap:
             fig.savefig(fname, format='png', dpi=150)
         if out:
             return fig
-            
     
     
+        
     def plot_ipf_map(self, dname, phase, ipfdir = [0,0,1], save=False, out=False, **kwargs):
-        """ plot orientation color map (using orix)
+        """ plot orientation color map (ipf colors)
         dname: data column, must be a Nx3x3 ndarray of orientation matrices
         phase : name of the phase to plot. must be in self.phases
-        ipfdir: direction for the ipf colorkey. must be a 3x1 vctor [x,y,z]. Default: z-vector
-        out: return orix crystalmap"""
+        ipfdir: direction for the ipf colorkey. must be a 3x1 vector [x,y,z]. Default: z-vector
+        out: return figure"""
         
         # select phase properties
         assert phase in self.phases.pnames
@@ -730,39 +735,30 @@ class Pixelmap:
         sym = cs.orix_phase.point_group.laue
         ipf_key = opl.IPFColorKeyTSL(sym, direction=ovec.Vector3d(ipfdir))
         
+        nx, ny = self.grid.nx, self.grid.ny
+        
         #convert matrix orientation to quaternions
         U = self.get(dname)
         ori = oq.Orientation.from_matrix(U, symmetry=sym)
         
-        # select phase id
-        phase_id = np.where(self.phase_id==cs.phase_id, cs.phase_id,-1)
-        
-        # orix crystal map
-        orix_map = ocm.CrystalMap(rotations = ori,
-                      phase_id = phase_id,
-                      x = self.xi,
-                      y = self.yi,
-                      phase_list = ocm.PhaseList(space_groups=[cs.spg_no],
-                                                 structures=[cs.str_diffpy]),
-                      scan_unit = self.grid.pixel_unit)
-        
-        # select orientations to plot
-        o = orix_map[phase].orientations
-        rgb = ipf_key.orientation2color(o)
+        # create rgb map 
+        rgb = ipf_key.orientation2color(ori)
+        sel  = self.phase_id == cs.phase_id
+        rgb[~sel] = 0    # reset pixels not belonging to selected phase to zero (black)
         
         # plot ipf map
         pl.matplotlib.rcParams.update({'font.size': 10})
-        fig = pl.figure(figsize=(8,8))
+        fig = pl.figure(figsize=(6,6))
 
-        ax0=fig.add_subplot(111, aspect='equal', projection='plot_map')
+        ax0=fig.add_subplot(111, aspect='equal')
         ax0.set_axis_off()
-        
-        ax0.plot_map(orix_map[phase], rgb, scalebar=False, **kwargs)
+        ax0.imshow( np.flipud(rgb.reshape(nx,ny,3)), **kwargs)
         ax0.title.set_text(phase+' - ipf map '+str(ipfdir))
+        ax0.add_artist(self.grid.scalebar())
 
         # plot color key
         pl.matplotlib.rcParams.update({'font.size': 4})
-        fig.subplots_adjust(right=0.75)
+        fig.subplots_adjust(right=0.7)
         ax1 = fig.add_axes([0.8, 0.25, 0.15, 0.15], projection='ipf',  symmetry=sym)
         ax1.plot_ipf_color_key(show_title=False)
 
@@ -777,6 +773,7 @@ class Pixelmap:
         
         if out:
             return fig
+
         
 
             
