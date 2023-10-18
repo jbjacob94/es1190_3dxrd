@@ -18,7 +18,7 @@ from id11_utils import peakfiles, crystal_structure
 
 # Note on pixel-by-pixel indexing strategy:
 ##################################
-#The classic indexing strategy with ImageD11 consists in finding g-vectors that are compatible in orientation, considering a given crystal symmetry and lattice parameters. However, this process becomes very inefficient as the number of peaks in the dataset grows very large, because it does not take into account positional information on grains, which is refined in a later stage. Using Friedel pairs, it is possible to relocate the source of diffraction in the sample reference frame (as long as the sample does not consists in a few very large grains, in this case peak position within the grain is poorly defined). Thus, it is possible to assign each peak a pixel on a 2d xy grid and do 'pixel-by'pixel' indexing. This allows to take into account precise information on peak location and makes the indexing process much faster, as the number of g-vectors to match for each pixel is only a small subset of the entire dataset. This pixel-by-pixel processing can also be done for phase identification (for polyphased samples) prior to indexing. This gives significantly better results than separating phases using only a simple threshold on two-theta angle
+#The classic indexing strategy with ImageD11 consists in finding g-vectors that are compatible in orientation, considering a given crystal symmetry and lattice parameters. However, this process becomes very inefficient as the number of peaks in the dataset grows very large, because it does not take into account positional information on grains, which is refined in a later stage. Using Friedel pairs, it is possible to relocate the source of diffraction in the sample reference frame (as long as the sample does not consists in a few very large grains, in this case peak position within the grain is poorly defined). Thus, it is possible to assign each peak to a pixel on a 2d xy grid and do 'pixel-by'pixel' indexing. This allows to take into account precise information on peak location and makes the indexing process much faster, as the number of g-vectors to match for each pixel is only a small subset of the entire dataset. This pixel-by-pixel processing can also be done for phase identification (for polyphased samples) prior to indexing. This gives significantly better results than separating phases using only a simple threshold on two-theta angle
 
 
 # General functions
@@ -371,7 +371,9 @@ class Pixelmap:
     
     
     def update_pixels(self, xyi_indx, dname, newvals):
-        """ update data column dname with new values for a subset of pixel selected by xyi indices, without touching other pixels
+        """ update data column 'dname' with new values for a subset of pixel selected by xyi indices, without touching other pixels.
+        Useful when indexing multiple phase ssuccessively
+        
         xyi_indx: list of xyi index of pixels to update
         dname: data column to update
         newvals: new values"""
@@ -387,7 +389,7 @@ class Pixelmap:
         
         
         # update data
-        assert newvals.shape[1:] == dat.shape[1:]  # check array shape compatibility
+        assert newvals.shape[1:] == dat[pxindx].shape[1:]  # check array shape compatibility
         if len(dat.shape) == 1:  # dat is simple 1d array
             dat[pxindx] = newvals.astype(dtype)
         else:    # nd array of arbitrary size
@@ -397,11 +399,13 @@ class Pixelmap:
         
         
     def update_grains_pxindx(self, mask=None, update_map=False):
-        """ update grains pixel indexing (pxindx / xyi_indx), according to criteria defined in mask.
-        Allows to remove bad pixels (large misorientation, low npks indexed, high drlv2, etc.) from grain masks
+        """ update px_to_grain indexing (pxindx / xyi_indx) for each grain, according to criteria defined in mask.
+        Allows to clean pks data associated to each grain (pks from pixels with large misorientation, low npks indexed, high drlv2, etc.)
+        
         mask: bool array of same shape as data columns (nx*ny,) to filter bad pixels
-        update_map: if True, grain_id in pixelmap will also be updated. MAKE A COPY OF PIXELMAP FIRST,
-        OR INITIAL GRAIN INDEXING WILL BE LOST"""
+        
+        update_map: if True, grain_id in pixelmap will also be updated.
+        MAKE A COPY OF PIXELMAP FIRST, OR INITIAL GRAIN INDEXING WILL BE LOST"""
         
         if mask is None:
             mask = np.full(self.xyi.shape, True)
@@ -515,7 +519,7 @@ class Pixelmap:
     
     def map_grain_prop(self, prop, pname):
         """ map a grain property (U, UBI, unitcell, grainsize, etc.) taken from grains in grains.dict. to the 2D grid.
-        For a grain property p, his function creates a new data column 'p_g' in pixelmap to map this property for each grain on
+        For a grain property p, this function creates a new data column 'p_g' in pixelmap to map this property for each grain on
         the 2D grid. For now, it only works for a single phase (pname): filter pixelmap before, to keep only one phase in the map
         
         To quickly map all six strain / stress components, simply type 'stress" or 'strain' as a prop and the function will
@@ -627,7 +631,7 @@ class Pixelmap:
         
         if save:
             fname = self.h5name.replace('.h5', '_'+dname+'.png')
-            fig.savefig(fname, format='png') 
+            fig.savefig(fname, format='png', dpi=150) 
         if out:
             return fig
             
@@ -677,7 +681,7 @@ class Pixelmap:
 
         if save:
             fname = self.h5name.replace('.h5', '_'+dname+'.png')
-            fig.savefig(fname, format='png', dpi=150)
+            fig.savefig(fname, format='png', dpi=300)
             
         if out:
             return fig
@@ -714,12 +718,11 @@ class Pixelmap:
         fig.suptitle('hist '+dname+' - '+dsname, y=1.0)
             
         if save:
-            fname = self.h5name.replace('.h5', '_'+dname+'_hist.png')
-            fig.savefig(fname, format='png', dpi=150)
+            fname = self.h5name.replace('.h5', '_'+dname+'_hist.pdf')
+            fig.savefig(fname, format='pdf', dpi=300)
         if out:
             return fig
-    
-    
+   
         
     def plot_ipf_map(self, dname, phase, ipfdir = [0,0,1], save=False, out=False, **kwargs):
         """ plot orientation color map (ipf colors)
@@ -765,8 +768,9 @@ class Pixelmap:
         dsname = self.h5name.split('/')[-1].split('.h')[0]
         
         if save:
-            fname = self.h5name.replace('.h5', '_ipf_'+str(ipfdir)+'.png')
-            fig.savefig(fname, format='png', dpi=150)
+            ipfd_str = ''.join(map(str, ipfdir))
+            fname = self.h5name.replace('.h5', '_'+phase+'_ipf_'+ipfd_str+'.pdf')
+            fig.savefig(fname, format='pdf', dpi=300)
 
         pl.matplotlib.rcParams.update({'font.size': 10})
         fig.suptitle(dsname, y=0.9)
