@@ -13,12 +13,12 @@ from orix import data, io, plot as opl, crystal_map as ocm, quaternion as oq, ve
 from id11_utils import peakfiles, crystal_structure
 
 
-# Collection of functions to work on 2D pixel maps. Includes Pixelmap Class: A class to store data on a 2D pixel grid. It is used to do pixel-by-pixel indexing and phase assignment and plot grain properties (orientation, indexing quality, etc.) on a 2D map
+# Collection of functions to work on 2D pixel maps. Includes Pixelmap Class: A class to store data on a 2D pixel grid. It is used to do pixel-by-pixel indexing, phase assignment and plot grain properties (orientation, indexing quality, etc.) on a 2D map
 #################################################################################################
 
 # Note on pixel-by-pixel indexing strategy:
 ##################################
-#The classic indexing strategy with ImageD11 consists in finding g-vectors that are compatible in orientation, considering a given crystal symmetry and lattice parameters. However, this process becomes very inefficient as the number of peaks in the dataset grows very large, because it does not take into account positional information on grains, which is refined in a later stage. Using Friedel pairs, it is possible to relocate the source of diffraction in the sample reference frame (as long as the sample does not consists in a few very large grains, in this case peak position within the grain is poorly defined). Thus, it is possible to assign each peak to a pixel on a 2d xy grid and do 'pixel-by'pixel' indexing. This allows to take into account precise information on peak location and makes the indexing process much faster, as the number of g-vectors to match for each pixel is only a small subset of the entire dataset. This pixel-by-pixel processing can also be done for phase identification (for polyphased samples) prior to indexing. This gives significantly better results than separating phases using only a simple threshold on two-theta angle
+#The classic indexing strategy with ImageD11 consists in finding g-vectors that are compatible in orientation, considering a given crystal symmetry and lattice parameters. However, this process becomes very inefficient as the number of peaks in the dataset grows very large, because it does not take into account positional information on grains, which is refined in a later stage. Using Friedel pairs, it is possible to relocate the source of diffraction in the sample reference frame (as long as the sample does not consists in a few very large grains, in this case peak position within the grain is poorly defined). Thus, it is possible to assign each peak to a pixel on a 2d xy grid and do 'pixel-by'pixel' indexing. This allows to take into account precise information on peak location. This makes the indexing process much faster, as the number of g-vectors to match for each pixel is only a small subset of the entire dataset and the indexing process can be parallelized to each pixel on the map. This pixel-by-pixel processing can also be done for phase identification (for polyphased samples) prior to indexing. This gives significantly better results than separating phases using only a simple threshold on two-theta angle, conflicts cause dby overlappinf tth rings can be solved pixel-by-pixel by selecting for each one the phase with the largest cumulated intensity.
 
 
 # General functions
@@ -70,18 +70,67 @@ def pks_from_neighbour_pixels_fast(cf, xp, yp, xymax):
 
 
 
+def get_searchsort_indx(ary):
+    """ find pixel indices xyi to pass to np.searchsorted. Needed for get_grain_pks (below)"""
+    searchsort_indx = [ary[0]]
+    for i in range(len(ary)-1):
+        if ary[i+1] == ary[i]+1:
+            continue
+        searchsort_indx.extend([ary[i]+1, ary[i+1]])
+    searchsort_indx.append(ary[-1]+1)
+    
+    assert len(searchsort_indx)%2 == 0 # even nb of indices
+    return searchsort_indx
+
+def get_grain_pks(cf, g):
+    """find peak indices corresponding to grain g in columnfile cf
+    input:
+    cf: columnfile sorted by xyi index
+    g: grain, must contain a property xyi_indx  xyi indices coresponding to the grain in pixelmap
+    output : 
+    pks: indices of peaks corresponding to grain g in cf (sorted by xyi)"""
+    
+    assert 'xyi_indx' in dir(g)
+    searchsort_inds = get_searchsort_indx(g.xyi_indx)  # indices to pass to np.searchsorted
+    bounds = np.searchsorted(cf.xyi, searchsort_inds)    # bounding values in 
+    
+    pks = []
+    
+    for i,j in zip(bounds[::2], bounds[1::2]):
+        pksi = np.arange(i,j, dtype='int')
+        pks = np.concatenate((pks, pksi)).astype(np.int32)
+    return pks
+
+
+def map_grains_to_cf(glist, cf):
+    """ find peak indices for all grains in glist and map grains to cf / pks to grains
+    (add grain_id column to cf and pksindx prop to all grains in glist)"""
+    
+    cf.sortby('xyi')  # needed for searchsorted
+    cf.addcolumn(np.full(cf.nrows, -1, dtype=np.int16), 'grain_id')
+
+    for g in tqdm.tqdm(glist):
+        assert np.all(['gid' in dir(g), 'xyi_indx' in dir(g)])   # check grain has grain id  + xyi coordinates mapping
+        gid = g.__getattribute__('gid')
+        
+        pksindx = get_grain_pks(cf,g)  # get peaks from grain g
+        
+        # map grain to cf and pks to grain
+        cf.grain_id[pksindx] = gid
+        g.pksindx = pksindx
+        
+    print('completed')  
+
+
 # to add to pixelmap: 
 ###################
 
-# index_phase_to_pixel(args=(cf_to_index, xi, yi, minpks))  from 005_label_pixelmap
-# find_pixel_orientations(args=(to_index, xi, yi, etc.))    from 006_index_pixelmap
+# index_phase_to_pixel(args=(cf_to_index, xi, yi, minpks))  from 005_label_pixelmap in apr23 folder
+# find_pixel_orientations(args=(to_index, xi, yi, etc.))    from 006_index_pixelmap in apr23 folder
 #
 # methods: 
-# - copy
 # - update column  Need to secure operations to avoid overwriting a full column by mistake
-# list dataformat for each column: int16, int32, float
-# - convert to orix crystalmap
-# - plot data 
+
 
 # Pixelmap object
 ###########################################################################
@@ -246,6 +295,12 @@ class Pixelmap:
                 sJ2 = 1/2*(g.s11**2 + g.s22**2 + g.s33**2) - 1/6*g.sI1**2
                 g.sJ2 = np.max(sJ2,0) # J2 is positive
                 
+        
+        def map_grains_to_cf(self, cf):
+            """ run map to cf function on grains from glist. make sure gdict is also updated """
+            map_grains_to_cf(self.glist, cf)
+            self.dict = dict(zip(self.gids, self.glist))
+                
                 
         def plot_grains_prop(self, prop, s_fact=10, trim=[5,95], out=False, **kwargs):
             """ scatter plot of grains colored by property prop, where (x,y) is grain centroid position and s is grainsize. 
@@ -371,9 +426,7 @@ class Pixelmap:
     
     
     def update_pixels(self, xyi_indx, dname, newvals):
-        """ update data column 'dname' with new values for a subset of pixel selected by xyi indices, without touching other pixels.
-        Useful when indexing multiple phase ssuccessively
-        
+        """ update data column dname with new values for a subset of pixel selected by xyi indices, without touching other pixels
         xyi_indx: list of xyi index of pixels to update
         dname: data column to update
         newvals: new values"""
@@ -389,7 +442,7 @@ class Pixelmap:
         
         
         # update data
-        assert newvals.shape[1:] == dat[pxindx].shape[1:]  # check array shape compatibility
+        assert newvals.shape[1:] == dat.shape[1:]  # check array shape compatibility
         if len(dat.shape) == 1:  # dat is simple 1d array
             dat[pxindx] = newvals.astype(dtype)
         else:    # nd array of arbitrary size
@@ -399,13 +452,11 @@ class Pixelmap:
         
         
     def update_grains_pxindx(self, mask=None, update_map=False):
-        """ update px_to_grain indexing (pxindx / xyi_indx) for each grain, according to criteria defined in mask.
-        Allows to clean pks data associated to each grain (pks from pixels with large misorientation, low npks indexed, high drlv2, etc.)
-        
+        """ update grains pixel indexing (pxindx / xyi_indx), according to criteria defined in mask.
+        Allows to remove bad pixels (large misorientation, low npks indexed, high drlv2, etc.) from grain masks
         mask: bool array of same shape as data columns (nx*ny,) to filter bad pixels
-        
-        update_map: if True, grain_id in pixelmap will also be updated.
-        MAKE A COPY OF PIXELMAP FIRST, OR INITIAL GRAIN INDEXING WILL BE LOST"""
+        update_map: if True, grain_id in pixelmap will also be updated. MAKE A COPY OF PIXELMAP FIRST,
+        OR INITIAL GRAIN INDEXING WILL BE LOST"""
         
         if mask is None:
             mask = np.full(self.xyi.shape, True)
@@ -423,7 +474,9 @@ class Pixelmap:
         
     def filter_by_phase(self, pname):
         """ makes a deep copy of pixelmap and reset all pixels not corresponding to selected phase to zero. 
-        also update h5name in new pixelmap to avoid overwriting former file"""
+        also update h5name in new pixelmap to avoid overwriting former file
+        input: phase name, must be in self.phases
+        output: xmap_p: new xmap """
         
         # make a copy of pixelmap
         xmap_p = self.copy()
@@ -459,14 +512,16 @@ class Pixelmap:
         return xmap_p
     
     
-    def add_grains_from_map(self, pname):
+    def add_grains_from_map(self, pname, overwrite=False):
         """ create grains dict directly from pixelmap. requires data columns for grain ids ('grain_id') and pixel UBI
         ('UBI') in pixelmap. It uses a mask to select pixels by grain id, compute median UBI over each grain, create 
         ImageD11.grains from it and add them to pixelmap.grains
-        For now, only works for a single phase: filter pixelmap before, to keep only one phase in the map"""
+        pname: name of phase to selec. must be in self.phases
+        overwrite: re-initialize grains dict
+        TO DO: find a better method to fit the 'mean UBI' over grain mask:
+        just taking average / median of each component of the UBI matrix individually is dodgy"""
         
         assert 'UBI' in self.__dict__.keys()
-        gid_u = np.unique(self.grain_id).astype(np.int16)  # list of unique grain ids
               
         # crystal structure
         cs = self.phases.get(pname)
@@ -475,9 +530,13 @@ class Pixelmap:
         # phase + UBI masks. pm: also select notindexed pixels, because some are included to grain masks by smoothing (mtex)
         pm = np.any([self.phase_id == pid, self.phase_id == -1], axis=0)  
         isUBI = np.asarray( [np.trace(ubi) != 0 for ubi in self.UBI] )   # mask: True if UBI at a given pixel position is not null
-  
-        # initialize grain
-        self.grains.__init__()
+      
+        # list of unique grain ids for the selected phase
+        gid_u = np.unique(self.grain_id[pm]).astype(np.int16)  
+        
+        # if overwrite, re-initialize grains dict. Otherwise, keep existing grains in grains dict and append new ones
+        if overwrite:
+            self.grains.__init__()
         
         # loop through unique grain ids, select pixels, compute mean ubi and create grain
         ########################################
@@ -495,6 +554,7 @@ class Pixelmap:
         
             # grain to xmap indexing
             g.gid = i
+            g.phase = pname
             g.pxindx = np.argwhere(gm*isUBI)[:,0].astype(np.int32)  # pixel indices in grainmap matching with this grain
             g.grainSize = len(g.pxindx)
             g.surf = g.grainSize * self.grid.pixel_size**2  # grain surface in pixel_unit square
@@ -518,8 +578,8 @@ class Pixelmap:
      
     
     def map_grain_prop(self, prop, pname):
-        """ map a grain property (U, UBI, unitcell, grainsize, etc.) taken from grains in grains.dict. to the 2D grid.
-        For a grain property p, this function creates a new data column 'p_g' in pixelmap to map this property for each grain on
+        """ map a grain property (U, UBI, unitcell, grainsize, etc.) taken from grains in grains.dict to the 2D grid.
+        For a grain property p, his function creates a new data column 'p_g' in pixelmap to map this property for each grain on
         the 2D grid. For now, it only works for a single phase (pname): filter pixelmap before, to keep only one phase in the map
         
         To quickly map all six strain / stress components, simply type 'stress" or 'strain' as a prop and the function will
@@ -627,11 +687,11 @@ class Pixelmap:
                 cbar.ax.set_yticklabels(self.phases.pnames)
             else:
                 cbar = pl.colorbar(im, ax=ax, orientation='vertical', pad=0.08, shrink=0.7, label=dname)
-                cbar.formatter.set_powerlimits((-1, 1)) 
+                cbar.formatter.set_powerlimits((0, 0)) 
         
         if save:
             fname = self.h5name.replace('.h5', '_'+dname+'.png')
-            fig.savefig(fname, format='png', dpi=150) 
+            fig.savefig(fname, format='png') 
         if out:
             return fig
             
@@ -668,7 +728,6 @@ class Pixelmap:
             norm=pl.matplotlib.colors.CenteredNorm(vcenter=np.median(x_u), halfrange=up)
             im = a.pcolormesh(xb, yb, x, norm=norm, **kwargs)
             a.set_title(t)
-            a.add_artist(self.grid.scalebar())
             
             # colorbar
             cbar = pl.colorbar(im, ax=a, orientation='vertical', pad=0.04, shrink=0.7)
@@ -681,7 +740,7 @@ class Pixelmap:
 
         if save:
             fname = self.h5name.replace('.h5', '_'+dname+'.png')
-            fig.savefig(fname, format='png', dpi=300)
+            fig.savefig(fname, format='png', dpi=150)
             
         if out:
             return fig
@@ -718,18 +777,19 @@ class Pixelmap:
         fig.suptitle('hist '+dname+' - '+dsname, y=1.0)
             
         if save:
-            fname = self.h5name.replace('.h5', '_'+dname+'_hist.pdf')
-            fig.savefig(fname, format='pdf', dpi=300)
+            fname = self.h5name.replace('.h5', '_'+dname+'_hist.png')
+            fig.savefig(fname, format='png', dpi=150)
         if out:
             return fig
-   
-        
+            
+    
+    
     def plot_ipf_map(self, dname, phase, ipfdir = [0,0,1], save=False, out=False, **kwargs):
-        """ plot orientation color map (ipf colors)
+        """ plot orientation color map (using orix)
         dname: data column, must be a Nx3x3 ndarray of orientation matrices
         phase : name of the phase to plot. must be in self.phases
-        ipfdir: direction for the ipf colorkey. must be a 3x1 vector [x,y,z]. Default: z-vector
-        out: return figure"""
+        ipfdir: direction for the ipf colorkey. must be a 3x1 vctor [x,y,z]. Default: z-vector
+        out: return orix crystalmap"""
         
         # select phase properties
         assert phase in self.phases.pnames
@@ -738,50 +798,57 @@ class Pixelmap:
         sym = cs.orix_phase.point_group.laue
         ipf_key = opl.IPFColorKeyTSL(sym, direction=ovec.Vector3d(ipfdir))
         
-        nx, ny = self.grid.nx, self.grid.ny
-        
         #convert matrix orientation to quaternions
         U = self.get(dname)
         ori = oq.Orientation.from_matrix(U, symmetry=sym)
         
-        # create rgb map 
-        rgb = ipf_key.orientation2color(ori)
-        sel  = self.phase_id == cs.phase_id
-        rgb[~sel] = 0    # reset pixels not belonging to selected phase to zero (black)
+        # select phase id
+        phase_id = np.where(self.phase_id==cs.phase_id, cs.phase_id,-1)
+        
+        # orix crystal map
+        orix_map = ocm.CrystalMap(rotations = ori,
+                      phase_id = phase_id,
+                      x = self.xi,
+                      y = self.yi,
+                      phase_list = ocm.PhaseList(space_groups=[cs.spg_no],
+                                                 structures=[cs.str_diffpy]),
+                      scan_unit = self.grid.pixel_unit)
+        
+        # select orientations to plot
+        o = orix_map[phase].orientations
+        rgb = ipf_key.orientation2color(o)
         
         # plot ipf map
         pl.matplotlib.rcParams.update({'font.size': 10})
-        fig = pl.figure(figsize=(6,6))
+        fig = pl.figure(figsize=(8,8))
 
-        ax0=fig.add_subplot(111, aspect='equal')
+        ax0=fig.add_subplot(111, aspect='equal', projection='plot_map')
         ax0.set_axis_off()
-        ax0.imshow( np.flipud(rgb.reshape(nx,ny,3)), **kwargs)
+        
+        ax0.plot_map(orix_map[phase], rgb, scalebar=False, **kwargs)
         ax0.title.set_text(phase+' - ipf map '+str(ipfdir))
-        ax0.add_artist(self.grid.scalebar())
 
         # plot color key
         pl.matplotlib.rcParams.update({'font.size': 4})
-        fig.subplots_adjust(right=0.7)
+        fig.subplots_adjust(right=0.75)
         ax1 = fig.add_axes([0.8, 0.25, 0.15, 0.15], projection='ipf',  symmetry=sym)
         ax1.plot_ipf_color_key(show_title=False)
 
         dsname = self.h5name.split('/')[-1].split('.h')[0]
         
         if save:
-            ipfd_str = ''.join(map(str, ipfdir))
-            fname = self.h5name.replace('.h5', '_'+phase+'_ipf_'+ipfd_str+'.pdf')
-            fig.savefig(fname, format='pdf', dpi=300)
+            fname = self.h5name.replace('.h5', '_ipf_'+str(ipfdir)+'.png')
+            fig.savefig(fname, format='png', dpi=150)
 
         pl.matplotlib.rcParams.update({'font.size': 10})
         fig.suptitle(dsname, y=0.9)
         
         if out:
             return fig
-
         
 
             
-    # TO DO : Make it compress better. Can use less space-consuming dtypes or some arrays.  Need also to update save grains function
+    # TO DO : Make it compress better. Can use less space-consuming dtypes on some arrays.  Need also to update save grains function
     def save_to_hdf5(self, h5name=None, debug=0):
         """ save pixelmap to hdf5 format"""
         # save path
@@ -906,18 +973,23 @@ def save_grains_dict(grainsdict, h5name, debug=0):
         for i,g in grainsdict.items():
             gr = grains_grp.create_group(str(i))    
             gprops = [p for p in list(g.__dict__.keys()) if not p.startswith('_')]  # list grain properties, skip _U, _UB etc. (dependent)
-
+            
+            if debug:
+                print(gprops)
+            
             for p in gprops:
                 attr = g.__getattribute__(p)
                 if attr is None:   # skip empty attributes
                     continue
-                
                 # find data type + shape
                 if np.issubdtype(type(attr), np.integer):
                     dtype = 'int'
                     shape = None
                 elif np.issubdtype(type(attr), np.floating):
                     dtype = 'float'
+                    shape = None
+                elif isinstance(attr, str):
+                    dtype = str
                     shape = None
                 else:
                     attr = np.array(attr)
@@ -926,7 +998,9 @@ def save_grains_dict(grainsdict, h5name, debug=0):
                         dtype = type(attr.flatten()[0])
                     except:    # occurs if attr is empty
                         dtype = float
-                    
+                
+                if debug:
+                    print(p,dtype)
                 # save arrays as datasets
                 if shape is not None: 
                     gr.create_dataset(p, data = attr, dtype = dtype) 
