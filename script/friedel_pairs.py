@@ -18,7 +18,7 @@ from id11_utils import peakfiles
 
 
 def fix_ybins(ds):
-    """ds : ImageD11.sinograms.dataset.Dataset class object. Red dty bins information in ds and check that dty central scan is at position dty = 0. If not, update ymin, ymax and dty in dataset and recomputes ybins """
+    """ds : ImageD11.sinograms.dataset.Dataset class object. Read dty bins information in ds and check that dty central scan is at position dty = 0. If not, update ymin, ymax and dty in dataset and recomputes ybins """
     
     central_bin = len(ds.ybincens)//2
     c0 = ds.ybincens[central_bin]
@@ -41,7 +41,7 @@ def sort_ypairs(ds, show=True):
     search for symmetric dty scans ("ypairs") in a columnfile, and add them to dataset
     cf : ImageD11.columnfile. must contain a dty column
     ds : ImageD11.sinograms.dataset.Dataset object
-    output: ypairs: list of tuples with dty cooridnates (-y,+y) of symmetric scans 
+    output: ypairs: list of tuples with dty coordinates (-y,+y) of symmetric scans 
     """
     central_bin = len(ds.ybincens)//2
     hi_side = ds.ybincens[central_bin:].tolist()
@@ -108,7 +108,7 @@ def check_y_symmetry(cf, ds, saveplot=False):
     
     f.suptitle('dty alignment - dset '+str(ds.dset))
     if saveplot is True:
-        f.savefig(str(ds.datapath)+('_dty_alignment.png'), format='png')
+        f.savefig(os.path.join(ds.analysispath, ds.dsname+'_dty_alignment.png'), format='png')
         
 
 
@@ -233,7 +233,7 @@ def label_friedel_pairs(c1, c2, dist_max, dist_step, mult_fact_tth = 1/2, mult_f
         # find Friedel pairs. c1_indx / c2_indx: friedel pair indices in c1[msk1] and c2[msk2] (mask in compute_csr_dist_mat),
         # but since we ordered on fp_id first, indices to select are the same in c1 / c2
         
-        dij = compute_csr_dist_mat(c1, c2, dist_cutoff, mult_fact_tth = mult_fact_tth, mult_fact_I = mult_fact_I, verbose=verbose)
+        dij = compute_csr_dist_mat(c1, c2, dist_cutoff, mult_fact_tth = mult_fact_tth, mult_fact_I = mult_fact_I)
         dist, c1_indx, c2_indx = find_best_matches(dij, verbose=verbose)
         
     
@@ -262,7 +262,8 @@ def label_friedel_pairs(c1, c2, dist_max, dist_step, mult_fact_tth = 1/2, mult_f
         m1 = c1.fp_id>=0
         m2 = c2.fp_id>=0
         
-        print('dstep_max=', dist_steps[-1])
+        if verbose:
+            print('dstep_max=', dist_steps[-1])
         
         tth_dist = 1./(np.tan(np.radians(c1.tth[m1])) + 0.04) * mult_fact_tth - 1./(np.tan(np.radians(c2.tth[m2])) + 0.04) * mult_fact_tth
         sumI_dist = pow( c1.sum_intensity[m1], 1/3 ) * mult_fact_I - pow( c2.sum_intensity[m2], 1/3 ) * mult_fact_I
@@ -327,9 +328,9 @@ def label_friedel_pairs(c1, c2, dist_max, dist_step, mult_fact_tth = 1/2, mult_f
 
 # group processing of ypair in a single function, which takes a list of arguments provided in args. easier for multithreading with Pool
 def process_ypair(args):
-    cf, ds, yp, dist_max, dist_step, mult_fact_tth, mult_fact_I = args
+    cf, ds, yp, dist_max, dist_step, mult_fact_tth, mult_fact_I,doplot = args
     c1, c2 = select_ypair(cf, ds, yp)
-    c_merged = label_friedel_pairs(c1, c2, dist_max, dist_step, mult_fact_tth, mult_fact_I, verbose=False, doplot=False)
+    c_merged = label_friedel_pairs(c1, c2, dist_max, dist_step, mult_fact_tth, mult_fact_I, verbose=False, doplot=doplot)
     c_merged.sortby('fp_id')
     return c_merged
 
@@ -348,9 +349,9 @@ def find_all_pairs(cf, ds, dist_max=1., dist_step=0.05, mult_fact_tth = 1, mult_
     # list of arguments to be passed to process_ypair
     args = []
     for yp in sorted(ds.ypairs):
-        args.append((cf, ds, yp, dist_max, dist_step, mult_fact_tth, mult_fact_I))
+        args.append((cf, ds, yp, dist_max, dist_step, mult_fact_tth, mult_fact_I, doplot))
     
-   # if verbose:
+    #if verbose:
     print('Friedel pair search...')
     # for know, don't use multithreading since it does not work
     out = []
