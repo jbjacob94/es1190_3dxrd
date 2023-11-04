@@ -1,13 +1,12 @@
 import os, sys, glob, pprint
-import numpy as np, pylab as pl, h5py, fast_histogram
+import numpy as np, pylab as pl, h5py,hdf5plugin, fast_histogram
 import skimage.transform
 
-# Functions to be used on raw hdf5 data. Includes functions to read data, and scans, plot sinogram + iradon reconstruction, background estimation function
-# and a setup function for segmenter_raw.py
+# Functions to work on raw hdf5 data, for quick data visualization during acquisition. Includes functions to read data and scans, plot sinogram + iradon reconstruction + background estimation function
 
 def read_h5data( h5name, counter, scans ):
     """
-    Reads data from a hdf5 file. h5name is the name of hdf5 file, scans is the list of scans to read from the hdf5 file and counter is the parameter for  which we want to read the data
+    Reads rawdata from hdf5 file. h5name is the name of the hdf5 file, scans is the list of scans to read from the hdf5 file and counter is the parameter for  which we want to read the data
     """
     data = []
     with h5py.File(h5name,'r') as hin:
@@ -37,14 +36,14 @@ def plotsino(h5name):
     """
     # read data and arrange bins for plotting histogram
     scans = read_h5scans(h5name)
-    rot = read_h5data( h5name,'measurement/diffrz_center' , scans )
+    rot = read_h5data( h5name,'measurement/hrz_center' , scans )
     npx = [len(r) for r in rot]
     rot = np.concatenate( rot )
-    ctr = np.concatenate( read_h5data( h5name, 'measurement/frelon3_roi1_avg' , scans ) )
-    dty = read_h5data( h5name,'instrument/positioners/diffty', scans )
+    ctr = np.concatenate( read_h5data( h5name, 'measurement/frelon6_roi2_avg' , scans ) )
+    dty = read_h5data( h5name,'instrument/positioners/diffy', scans )
     dty = np.concatenate( [ np.full( n, y ) for n,y in zip(npx, dty)  ] )
     
-    rsteps = read_h5data( h5name,'measurement/diffrz_delta' , [scans[0]] )
+    rsteps = read_h5data( h5name,'measurement/hrz_delta' , [scans[0]] )
     rstep = np.abs(np.asarray(rsteps)).mean()
     rmin = rot.min()-rstep/2
     rmax = rot.max()+rstep/2
