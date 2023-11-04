@@ -1,4 +1,4 @@
-import os, sys, h5py
+import os, sys, h5py, tqdm
 import numpy as np, pylab as pl, math as m
 
 import fast_histogram
@@ -12,7 +12,6 @@ from ImageD11.blobcorrector import eiger_spatial
 
 import diffpy.structure
 import orix.crystal_map as ocm 
-import Dans_Diffraction as dif
 
 
 
@@ -115,11 +114,18 @@ def colf_to_hdf( colfile, hdffile, save_mode='minimal', name=None, compression='
             h.close()
             
 
+
+
+# Geometric corrections (using detector info), updates on columnfile parameters, load structure data
+########################################################################################
 def pkstocolf( pkd , parfile, 
             dxfile="/data/id11/nanoscope/Eiger/spatial_20210415_JW/e2dx.edf",
             dyfile="/data/id11/nanoscope/Eiger/spatial_20210415_JW/e2dy.edf",
           ):
-    """ Converts a dictionary of peaks saved in pkstable into and ImageD11 columnfile adds on the geometric computations (tth, eta, gvector, etc) """
+    """ 
+    Converts a dictionary of peaks saved in pkstable into and ImageD11 columnfile adds on the geometric computations (tth, eta, gvector, etc) 
+    !!! WORKS ONLY FOR EIGER DATA"""
+    
     spat = eiger_spatial( dxfile = dxfile, dyfile = dyfile )
     cf = columnfile.colfile_from_dict( spat( pkd ) )
     cf.parameters.loadparameters(parfile)
@@ -127,8 +133,6 @@ def pkstocolf( pkd , parfile,
     return cf
 
 
-# Geometric corrections (using detector info), updates on columnfile parameters, load structure data
-########################################################################################
 def fix_flt( c, cor, parfile ):
     """ 
     spline correction for ImageD11 columnfile
@@ -140,11 +144,14 @@ def fix_flt( c, cor, parfile ):
         c.addcolumn( c.s_raw.copy(), 'sc' )
         c.addcolumn( c.f_raw.copy(), 'fc' )
     
-    for i in range( c.nrows ):
+    for i in tqdm.tqdm(range( c.nrows )):
         c.sc[i], c.fc[i] = cor.correct( c.s_raw[i], c.f_raw[i] )
     c.parameters.loadparameters(parfile)
     c.updateGeometry()
     return c
+
+
+
 
 def get_uc(c, parfile):
     """ computes unitcell and hkl rings using parameters in the parameter files """ 
@@ -337,11 +344,11 @@ def compute_kde(cf, ds, tthmin=0, tthmax=20, npks_max = 1e6, tth_step = 0.001, b
         pl.title('Integrated intensity profile - '+ds.dsname)
         pl.show()
         if save:
-            fig.savefig(ds.datapath+'_kde.png', format='png')
+            fig.savefig(ds.analysispath+'_kde.png', format='png')
         
     if save:
         if fname is None:
-            fname = ds.datapath+'_bw'+str(bw)+'_kde.txt'
+            fname = os.path.join(ds.analysispath, ds.dsname+'_bw'+str(bw)+'_kde.txt')
         f = open(fname,'w')
         for l in range(len(x)):
             if format(pdf[l],'.4f') == '0.0000':    # replace zeros by 0.0001 to avoid crashes with profex
