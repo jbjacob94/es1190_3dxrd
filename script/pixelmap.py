@@ -103,13 +103,19 @@ def get_grain_pks(cf, g):
     return pks
 
 
-def map_grains_to_cf(glist, cf):
-    """ find peak indices for all grains in glist and map grains to cf / pks to grains
+def map_grains_to_cf(glist, cf, overwrite=False):
+    """ find peak indices for all grains in glist and map grains to cf / pks to grains 
     (add grain_id column to cf and pksindx prop to all grains in glist)
-    refine_ubis : if True, run score_and_refine using peak selection in g.pksindx and existing ubi n g.ubi to get a better fit of mean grain orientation + unitcell"""
+    
+    glist : list of grains (should have xyi_indx property)
+    cf: peakfile
+    overwrite : if True, reset grain_id column in peakfile. default if False
+    """
     
     cf.sortby('xyi')  # needed for searchsorted
-    cf.addcolumn(np.full(cf.nrows, -1, dtype=np.int16), 'grain_id')
+    
+    if 'grain_id' not in cf.titles or overwrite:
+        cf.addcolumn(np.full(cf.nrows, -1, dtype=np.int16), 'grain_id')
 
     for g in tqdm.tqdm(glist):
         assert np.all(['gid' in dir(g), 'xyi_indx' in dir(g)])   # check grain has grain id  + xyi coordinates mapping
@@ -133,7 +139,7 @@ def refine_grains(glist, cf, hkl_tol, sym, return_stats=True):
     sym : crystal symmetry, used to compute misorientation between old and new orientation. orix.quaternion.symmetry.Symmetry object
     return_stats: returns list of rotation (angle between old and new crystal orientation) + prop of peaks retained. Default is True"""
 
-    ubis_new, prop_indx, misOri = [], [], []
+    ubis_new, prop_indx, misOri, gids, Npks = [], [], [], [], []
     for g in tqdm.tqdm(glist):
         assert 'pksindx' in dir(g)
     
@@ -141,7 +147,7 @@ def refine_grains(glist, cf, hkl_tol, sym, return_stats=True):
         ubi = g.ubi.copy()
     
         # refine grain ubis
-        npks, drlv = ImageD11.cImageD11.score_and_refine(ubi, gv, hkl_tol)
+        npks_ind, drlv = ImageD11.cImageD11.score_and_refine(ubi, gv, hkl_tol)
     
         # compute rotation angle between former and new ubi + prop of peaks retained
         o = oq.Orientation.from_matrix(g.U, symmetry =sym)
@@ -149,12 +155,14 @@ def refine_grains(glist, cf, hkl_tol, sym, return_stats=True):
         
         ubis_new.append(ubi)
         misOri.append( o2.angle_with(o, degrees=True)[0] )
-        prop_indx.append( npks/len(g.pksindx) )
+        prop_indx.append( npks_ind/len(g.pksindx) )
+        gids.append(g.gid)
+        Npks.append(len(g.pksindx))
         
         g.set_ubi(ubi)
         
     if return_stats:
-        return prop_indx, misOri
+        return gids, Npks, prop_indx, misOri
 
 
     
@@ -554,10 +562,14 @@ class Pixelmap:
         """ create grains dict directly from pixelmap. requires data columns for grain ids ('grain_id') and pixel UBI
         ('UBI') in pixelmap. It uses a mask to select pixels by grain id, compute median UBI over each grain, create 
         ImageD11.grains from it and add them to pixelmap.grains
-        pname: name of phase to selec. must be in self.phases
-        overwrite: re-initialize grains dict
-        TO DO: find a better method to fit the 'mean UBI' over grain mask:
-        just taking average / median of each component of the UBI matrix individually is dodgy"""
+        
+        pname: name of phase to select. must be in self.phases
+        overwrite: re-initialize grains dict. Default is False
+        
+        NB: grains ubis at this stage are 'mean' ubis obtained by averaging each component of the UBI matrix individually.
+        This is quite dodgy, so you might want to refine ubis after this step. For this, you need to map peaks in the original peakfile
+        used for indexing to grain in xmap, and then run score_and_refine using these peaks. These two steps are done using the method 
+        "refine_pks_to_grains" """
         
         assert 'UBI' in self.__dict__.keys()
               
@@ -621,20 +633,29 @@ class Pixelmap:
         self.grains.dict = dict(zip(self.grains.gids, self.grains.glist))
         
         
-    def refine_pks_to_grains(self, pname, cf, hkl_tol, sym):
-        """ run map_grains_to_cf and refine_grains functions on grains from selected phase in xmap.grains.glist
+    def refine_pks_to_grains(self, pname, cf, hkl_tol, sym, overwrite=False):
+        """ run map_grains_to_cf and refine_grains functions on grains from selected phase in xmap.grains.glist.
         -> peaks to grain assignment: updates cf.grain_id column in peakfile and g.pksindx prop in grains
         -> grain ubi refinment : refines grain ubis and returns statistics about % of peaks retained and rotation between old and new orientation
-        make sure gdict is also updated """
+        make sure gdict is also updated
+        
+        pname : phase name to select
+        cf : peakfile
+        hkl_tol : tolerance to pass to score_and_refine
+        sym : crystal symmetry, used to compute angular shift between new and old orientation
+        overwrite : if True, reset 'grain_id' column in cf. default if False
+        """
         
         glist = self.grains.select_by_phase(pname)
+        
         print('peaks to grains mapping...')
-        map_grains_to_cf(glist, cf)
+        map_grains_to_cf(glist, cf, overwrite=overwrite)
         print('refining ubis...')
-        prop_indx, misOri = refine_grains(glist, cf, hkl_tol, sym, return_stats=True)
+        gids, Npks, prop_indx, misOri = refine_grains(glist, cf, hkl_tol, sym, return_stats=True)
+        
         self.grains.dict = dict(zip(self.grains.gids, self.grains.glist))
          
-        return prop_indx, misOri
+        return gids, Npks, prop_indx, misOri
     
 
     def map_grain_prop(self, prop, pname):
