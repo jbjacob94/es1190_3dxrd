@@ -747,10 +747,10 @@ class Pixelmap:
                 cbar.ax.set_yticklabels(self.phases.pnames)
             else:
                 cbar = pl.colorbar(im, ax=ax, orientation='vertical', pad=0.08, shrink=0.7, label=dname)
-                cbar.formatter.set_powerlimits((0, 0)) 
+                cbar.formatter.set_powerlimits((-1, 1)) 
         
         if save:
-            fname = self.h5name.replace('.h5', '_'+dname+'.png')
+            fname = self.h5name.replace('.h5', '_'+dname+'.png', dpi=150)
             fig.savefig(fname, format='png') 
         if out:
             return fig
@@ -800,7 +800,7 @@ class Pixelmap:
 
         if save:
             fname = self.h5name.replace('.h5', '_'+dname+'.png')
-            fig.savefig(fname, format='png', dpi=150)
+            fig.savefig(fname, format='png', dpi=300)
             
         if out:
             return fig
@@ -838,7 +838,7 @@ class Pixelmap:
             
         if save:
             fname = self.h5name.replace('.h5', '_'+dname+'_hist.png')
-            fig.savefig(fname, format='png', dpi=150)
+            fig.savefig(fname, format='pdf', dpi=300)
         if out:
             return fig
             
@@ -849,7 +849,7 @@ class Pixelmap:
         dname: data column, must be a Nx3x3 ndarray of orientation matrices
         phase : name of the phase to plot. must be in self.phases
         ipfdir: direction for the ipf colorkey. must be a 3x1 vctor [x,y,z]. Default: z-vector
-        out: return orix crystalmap"""
+        out: return figure"""
         
         # select phase properties
         assert phase in self.phases.pnames
